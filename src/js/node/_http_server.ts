@@ -1007,7 +1007,6 @@ function onServerSocketError(this: any, _err) {
 function noopOnError() {}
 
 const NodeHTTPServerSocket = class Socket extends Duplex {
-  bytesRead = 0;
   connecting = false;
   timeout = 0;
   [kBytesWritten] = 0;
@@ -1031,6 +1030,11 @@ const NodeHTTPServerSocket = class Socket extends Duplex {
     // events on the socket.
     this.on("error", onServerSocketError);
     server[kTrackedConnections]?.add(this);
+  }
+
+  get bytesRead() {
+    const handle = this[kHandle];
+    return handle ? (handle.response?.getBytesRead?.() ?? 0) : 0;
   }
 
   get bytesWritten() {
