@@ -1033,6 +1033,18 @@ const NodeHTTPServerSocket = class Socket extends Duplex {
     server[kTrackedConnections]?.add(this);
   }
 
+  emit(event) {
+    // Mirrors ServerResponse.prototype.emit: when the internal
+    // assignSocket path (`setCloseCallback(socket, onServerResponseClose)`)
+    // is in use, we must drive that one-shot callback here instead of
+    // relying on a real 'close' event listener. Without this the internal
+    // path never propagates the socket close to `res.on('close')`.
+    if (event === "close") {
+      callCloseCallback(this);
+    }
+    return Stream.prototype.emit.$apply(this, arguments);
+  }
+
   get bytesWritten() {
     const handle = this[kHandle];
     return handle
@@ -1094,6 +1106,16 @@ const NodeHTTPServerSocket = class Socket extends Duplex {
     this[kHandle] = null;
     this.server?.[kTrackedConnections]?.delete(this);
 
+    // End the readable side first so `socket.on('end')` fires on peer
+    // disconnect, regardless of whether the request body had been fully
+    // consumed at the time of the abort. Mirrors Node's net.Socket
+    // handling of UV_EOF: push(null) + read(0) to drain the state machine.
+    if (!this.destroyed && this.readable && !this.readableEnded) {
+      if (!this.push(null)) {
+        this.read(0);
+      }
+    }
+
     // Node.js's `socketOnClose` → `abortIncoming()` only destroys requests
     // that are still in `state.incoming` — i.e. requests whose response has
     // not yet finished (`resOnFinish` does `incoming.shift()`). Our
@@ -1130,6 +1152,16 @@ const NodeHTTPServerSocket = class Socket extends Duplex {
     // onServerResponseClose socket listener does.
     if (message && !message._closed) {
       process.nextTick(emitCloseNT, message);
+    }
+
+    // Ensure the Duplex socket itself emits 'close'/'end' when the native
+    // socket goes away. The req.destroy() branch above only destroys the
+    // socket when shouldEmitAborted is true (an incomplete request); once the
+    // request body was fully consumed (req.complete === true) nothing else
+    // tears the Duplex down, so `socket.on('close')` would never fire after a
+    // peer abort on a POST whose body had already been read.
+    if (!this.destroyed) {
+      this.destroy();
     }
   }
   #onCloseForDestroy(closeCallback, err?: Error) {
