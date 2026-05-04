@@ -209,7 +209,6 @@ describe("node:http", () => {
         server.close();
       }
     });
-
   });
 
   describe("response", () => {
