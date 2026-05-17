@@ -1402,3 +1402,4 @@ test("runtime transpiler does not collapse single-return arrow bodies", async ()
   expect(noArgs).toContain("return 42");
   expect(stderr).toBe("");
   expect(exitCode).toBe(0);
+});

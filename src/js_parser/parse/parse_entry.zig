@@ -185,9 +185,7 @@ pub const Parser = struct {
         try JavaScriptParser.init(this.allocator, this.log, this.source, this.define, this.lexer, this.options, &p);
         defer p.lexer.deinit();
 
-        // track_comments is irrelevant here — toLazyExportAST operates on a
-        // pre-built Expr and never lexes source.
-
+        p.lexer.track_comments = this.options.features.minify_identifiers;
         // Instead of doing "should_fold_typescript_constant_expressions or features.minify_syntax"
         // Let's enable this flag file-wide
         if (p.options.features.minify_syntax or
@@ -1495,15 +1493,15 @@ pub const Parser = struct {
     }
 
     pub fn init(_options: Options, log: *logger.Log, source: *const logger.Source, define: *Define, allocator: Allocator) !Parser {
+        var lexer = js_lexer.Lexer.initWithoutReading(log, source, allocator);
+        // Must be set before the priming next() so leading comments are seen.
+        lexer.track_comments = _options.features.minify_identifiers;
+        lexer.step();
+        try lexer.next();
         return Parser{
             .options = _options,
             .allocator = allocator,
-            .lexer = try js_lexer.Lexer.initWithTrackComments(
-                log,
-                source,
-                allocator,
-                _options.features.minify_identifiers,
-            ),
+            .lexer = lexer,
             .define = define,
             .source = source,
             .log = log,

@@ -6801,10 +6801,7 @@ pub fn NewParser_(
                 // Only enable during bundling, when not bundling CJS
                 .commonjs_named_exports_deoptimized = if (opts.bundle) opts.output_format == .cjs else true,
             };
-            // `lexer.track_comments` is already set by Parser.init via
-            // js_lexer.Lexer.initWithTrackComments, which is the only way to
-            // catch comments at the very start of the file (before step()/next()
-            // consume them).
+            this.lexer.track_comments = opts.features.minify_identifiers;
 
             this.unwrap_all_requires = brk: {
                 if (opts.bundle and opts.output_format != .cjs) {
