@@ -452,3 +452,8 @@ test/js/third_party/prisma/prisma.test.ts
 # upgradeDuplexToTLS protos/server_name Box<[u8]> are owned by the JS-held
 # socket cell; tests that exit before a final GC report them as indirect leaks.
 test/js/node/tls/node-tls-connect.test.ts
+
+# Worker with preload exposes pre-existing async-transpile leak
+# (RuntimeTranspilerStore::TranspilerJob::run → sourcemap::Builder::finalize).
+# The existing transpiler suppressions only cover the sync path.
+test/regression/issue/21101.test.ts
