@@ -1216,7 +1216,7 @@ impl<'a> Parser<'a> {
                             default_name: None,
                             items: bun_ast::StoreSlice::EMPTY,
                             is_single_line: false,
-                            phase_defer: false,
+                            phase: bun_ast::ImportPhase::Evaluation,
                         },
                         ns_loc,
                     );
@@ -2015,7 +2015,7 @@ impl<'a> Parser<'a> {
                         default_name: None,
                         star_name_loc: bun_ast::Loc::EMPTY,
                         is_single_line: false,
-                        phase_defer: false,
+                        phase: bun_ast::ImportPhase::Evaluation,
                     },
                     bun_ast::Loc::EMPTY,
                 );
