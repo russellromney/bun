@@ -6110,9 +6110,7 @@ pub mod __gated_printer {
                         {
                             ImportPhase::Evaluation
                         }
-                        ImportPhase::Source if s.default_name.is_none() => {
-                            ImportPhase::Evaluation
-                        }
+                        ImportPhase::Source if s.default_name.is_none() => ImportPhase::Evaluation,
                         phase => phase,
                     };
                     match phase {
