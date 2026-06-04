@@ -800,6 +800,12 @@ function skipIfInspectorDisabled() {
   }
 }
 
+function skipIfSQLiteMissing() {
+  if (!process.versions.sqlite) {
+    skip('missing SQLite');
+  }
+}
+
 function skipIf32Bits() {
   if (bits < 64) {
     skip('The tested feature is not available in 32bit builds');
@@ -1115,6 +1121,7 @@ const common = {
   skipIfDumbTerminal,
   skipIfEslintMissing,
   skipIfInspectorDisabled,
+  skipIfSQLiteMissing,
   skipIfWorker,
   spawnPromisified,
 
