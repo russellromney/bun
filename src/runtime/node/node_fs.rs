@@ -6753,7 +6753,6 @@ impl NodeFS {
                     };
                 }
             }
-            // async path: honors args.encoding to align with sync/non-recursive.
             T::append_entry_recursive(
                 entries,
                 utf8_name,
@@ -6938,7 +6937,6 @@ impl NodeFS {
                         };
                     }
                 }
-                // sync path: uses `webcore::encoding::to_bun_string(.., args.encoding)`.
                 T::append_entry_recursive(
                     entries,
                     utf8_name,
