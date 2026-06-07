@@ -572,9 +572,7 @@ test("--preserve-symlinks resolves a symlinked file's imports from the link path
       ["--preserve-symlinks", join("app", "shared", "math.ts")],
       "out-entry",
     );
-    if (exitCode !== 0) {
-      expect(stderr).toBe("");
-    }
+    expect(stderr).toBe("");
     expect(exitCode).toBe(0);
     expect(bundle).toContain("fakedec-from-app-node-modules");
   }
@@ -582,9 +580,7 @@ test("--preserve-symlinks resolves a symlinked file's imports from the link path
   // --preserve-symlinks with the symlinked file reached through an import.
   {
     const { stderr, exitCode, bundle } = await build(["--preserve-symlinks", join("app", "index.ts")], "out-import");
-    if (exitCode !== 0) {
-      expect(stderr).toBe("");
-    }
+    expect(stderr).toBe("");
     expect(exitCode).toBe(0);
     expect(bundle).toContain("fakedec-from-app-node-modules");
   }
