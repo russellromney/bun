@@ -338,5 +338,7 @@ const errors: ErrorCodeMapping = [
   ["ERR_FS_CP_EEXIST", Error],
   ["ERR_FS_CP_SYMLINK_TO_SUBDIRECTORY", Error],
   ["ERR_DIR_CONCURRENT_OPERATION", Error],
+  ["ERR_INVALID_TYPESCRIPT_SYNTAX", SyntaxError],
+  ["ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX", SyntaxError],
 ];
 export default errors;
