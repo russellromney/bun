@@ -1818,7 +1818,10 @@ impl PostgresSQLConnection {
             && !flags.contains(ConnectionFlags::WAITING_TO_PREPARE)
         {
             self.advance();
-            self.flush_data();
+            // defer the flush, so many queries enqueued in the same tick
+            // coalesce into one socket write (same batching as
+            // flush_data_and_reset_timeout)
+            self.register_auto_flusher();
         }
     }
 
@@ -2285,12 +2288,13 @@ impl PostgresSQLConnection {
                 }
 
                 QueryStatus::Running | QueryStatus::Binding | QueryStatus::PartialResponse => {
-                    if self
-                        .flags
-                        .get()
-                        .contains(ConnectionFlags::WAITING_TO_PREPARE)
-                        || self.nonpipelinable_requests.get() > 0
-                    {
+                    // can_pipeline() covers WAITING_TO_PREPARE and
+                    // nonpipelinable_requests, and additionally stops us from
+                    // writing past in-flight requests when pipelining is off
+                    // (BUN_FEATURE_FLAG_DISABLE_SQL_AUTO_PIPELINING, unnamed
+                    // prepared statements) or the write buffer is already at
+                    // MAX_PIPELINE_SIZE.
+                    if !self.can_pipeline() {
                         defer_cleanup!(self);
                         return;
                     }
