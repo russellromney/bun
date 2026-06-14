@@ -534,7 +534,7 @@ impl UpgradeCommand {
     }
 
     fn _exec(ctx: Command::Context) -> Result<(), bun_core::Error> {
-        HTTP::http_thread::init(&Default::default());
+        HTTP::http_thread::init_or_crash(&Default::default());
 
         // SAFETY: FileSystem::init returns the process-global singleton; valid for 'static.
         let filesystem = unsafe { &mut *fs::FileSystem::init(None)? };

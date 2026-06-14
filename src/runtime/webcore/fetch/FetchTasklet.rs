@@ -2145,7 +2145,13 @@ impl FetchTasklet {
         fetch_options: FetchOptions,
         promise: jsc::JSPromiseStrong,
     ) -> Result<*mut FetchTasklet, BunError> {
-        http::http_thread::init(&http::http_thread::InitOpts::default());
+        // The sole caller (`fetch_impl`) already checked `init()` and rejected
+        // the promise on failure, so this call is a no-op `Ok` on every path
+        // that reaches here; keep it for `HTTP_THREAD_INIT` ordering should
+        // another caller ever appear.
+        if http::http_thread::init(&http::http_thread::InitOpts::default()).is_err() {
+            return Err(err!("FailedToStartHTTPClientThread"));
+        }
         let node = Self::get(global, fetch_options, promise)?;
 
         let node_ref = Self::from_raw_mut(node);

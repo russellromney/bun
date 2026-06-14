@@ -458,7 +458,9 @@ pub(crate) unsafe fn __bun_resolver_init_package_manager(
     mut env: core::ptr::NonNull<bun_dotenv::Loader<'static>>,
 ) -> Result<core::ptr::NonNull<dyn hooks::AutoInstaller>, bun_core::Error> {
     // Idempotent.
-    bun_http::http_thread::init(&Default::default());
+    if bun_http::http_thread::init(&Default::default()).is_err() {
+        return Err(bun_core::err!("FailedToStartHTTPClientThread"));
+    }
 
     // SAFETY: when `Some`, `install` points at a live `Api::BunInstall`
     // (see `run_command::wire_transpiler_from_ctx`); read-only borrow.
