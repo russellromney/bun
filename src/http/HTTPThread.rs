@@ -1244,24 +1244,23 @@ mod _event_loop_draft {
         crate::HTTP_THREAD_INIT.store(true, core::sync::atomic::Ordering::Release);
         bun_libdeflate_sys::libdeflate::load();
         let opts_copy = opts.clone();
-        let thread =
-            if bun_core::env_var::feature_flag::BUN_INTERNAL_FAIL_HTTP_THREAD_SPAWN.get()
-                == Some(true)
-            {
-                // Test-only: simulate CreateThread/pthread_create failure so the
-                // fetch()/S3 rejection path can be exercised without exhausting
-                // real OS thread limits (which is not reliably reproducible in CI).
-                Err(std::io::Error::from_raw_os_error(
-                    #[cfg(windows)]
-                    8, // ERROR_NOT_ENOUGH_MEMORY
-                    #[cfg(not(windows))]
-                    libc::EAGAIN,
-                ))
-            } else {
-                std::thread::Builder::new()
-                    .stack_size(bun_threading::thread_pool::DEFAULT_THREAD_STACK_SIZE as usize)
-                    .spawn(move || on_start(opts_copy))
-            };
+        let thread = if bun_core::env_var::feature_flag::BUN_INTERNAL_FAIL_HTTP_THREAD_SPAWN.get()
+            == Some(true)
+        {
+            // Test-only: simulate CreateThread/pthread_create failure so the
+            // fetch()/S3 rejection path can be exercised without exhausting
+            // real OS thread limits (which is not reliably reproducible in CI).
+            Err(std::io::Error::from_raw_os_error(
+                #[cfg(windows)]
+                8, // ERROR_NOT_ENOUGH_MEMORY
+                #[cfg(not(windows))]
+                libc::EAGAIN,
+            ))
+        } else {
+            std::thread::Builder::new()
+                .stack_size(bun_threading::thread_pool::DEFAULT_THREAD_STACK_SIZE as usize)
+                .spawn(move || on_start(opts_copy))
+        };
         match thread {
             // detach — see HTTP_THREAD_HANDLE note above re: LSAN reachability
             Ok(t) => {
@@ -1275,8 +1274,7 @@ mod _event_loop_draft {
                 // exhaustion (ERROR_NOT_ENOUGH_MEMORY) from sandbox/AV denial
                 // (ERROR_ACCESS_DENIED). CLI callers still crash via
                 // `init_or_crash`.
-                let _ = SPAWN_ERROR
-                    .set(format!("Failed to start HTTP Client thread: {}", err));
+                let _ = SPAWN_ERROR.set(format!("Failed to start HTTP Client thread: {}", err));
             }
         }
     }

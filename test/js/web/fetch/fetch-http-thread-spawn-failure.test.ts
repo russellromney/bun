@@ -4,7 +4,7 @@
 // panicking the whole process.
 //
 // Sentry: BUN-2V2S "Failed to start HTTP Client thread: Unexpected"
-import { test, expect, describe } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { bunEnv, bunExe } from "harness";
 
 // There is no portable way to force CreateThread/pthread_create to fail
