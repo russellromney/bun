@@ -269,6 +269,7 @@ export function getJS2NativeRust() {
   const handExported = new Set<string>([
     "JS2Zig___src_runtime_dns_jsc_dns_zig__Resolver_getRuntimeDefaultResultOrderOption",
     "JS2Zig___src_runtime_dns_jsc_dns_zig__Resolver_newResolver",
+    "JS2Zig___src_runtime_dns_jsc_dns_zig__TestingAPIs_setFailNextResultBuild",
   ]);
 
   const srcRoot = path.resolve(import.meta.dir, "..");

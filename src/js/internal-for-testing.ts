@@ -80,6 +80,14 @@ export const subprocessInternals = {
   ) => boolean,
 };
 
+export const dnsInternals = {
+  setFailNextResultBuild: $newZigFunction(
+    "runtime/dns_jsc/dns.zig",
+    "TestingAPIs.setFailNextResultBuild",
+    0,
+  ) as () => void,
+};
+
 export const iniInternals = {
   parse: $newZigFunction("ini.zig", "IniTestingAPIs.parse", 1),
   loadNpmrc: $newZigFunction("ini.zig", "IniTestingAPIs.loadNpmrcFromJS", 2),
