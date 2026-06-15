@@ -409,6 +409,13 @@ pub mod bcrypt {
 
         // salt / hash — standard no-pad base64.
         let (salt_b64, hash_b64) = rest.split_once('$').ok_or_else(invalid)?;
+        // phc_format.deserialize rejects leftover `$`-separated tokens after
+        // the last struct field as `InvalidEncoding`; `split_once` leaves any
+        // trailing segments in `hash_b64`, so reject them here before the size
+        // check below can misclassify the inflated length as `NoSpaceLeft`.
+        if hash_b64.contains('$') {
+            return Err(invalid());
+        }
         let decoder = &bun_base64::zig_base64::STANDARD_NO_PAD.decoder;
 
         // phc_format.BinValue(N).fromB64 semantics: `calcSizeForSlice` failure

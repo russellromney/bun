@@ -280,6 +280,23 @@ test("bcrypt PHC verify: oversized salt/hash surfaces as PASSWORD_NO_SPACE_LEFT"
       code: "PASSWORD_NO_SPACE_LEFT",
     });
   }
+
+  // Extra `$`-separated fields after the hash are a structural error in
+  // phc_format and must stay `InvalidEncoding`, not be misread as an
+  // oversized hash.
+  for (const trailing of ["$xx", "$"]) {
+    const encoded = `$bcrypt$r=4$${salt16}$${hash23}${trailing}`;
+    let thrown: any;
+    try {
+      password.verifySync("x", encoded);
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown?.code).toBe("PASSWORD_INVALID_ENCODING");
+    await expect(password.verify("x", encoded)).rejects.toMatchObject({
+      code: "PASSWORD_INVALID_ENCODING",
+    });
+  }
 });
 
 test("bcrypt pre-hashing does not break compatibility across Bun versions", async () => {
