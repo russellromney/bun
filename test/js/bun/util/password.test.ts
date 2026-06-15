@@ -263,40 +263,31 @@ test("bcrypt PHC verify: oversized salt/hash surfaces as PASSWORD_NO_SPACE_LEFT"
   const hash23 = Buffer.alloc(23, 0).toString("base64").replace(/=+$/, "");
   const hash24 = Buffer.alloc(24, 0).toString("base64").replace(/=+$/, "");
 
-  const oversizedSalt = `$bcrypt$r=4$${salt24}$${hash23}`;
-  const oversizedHash = `$bcrypt$r=4$${salt16}$${hash24}`;
-
-  for (const encoded of [oversizedSalt, oversizedHash]) {
+  async function expectCode(encoded: string, code: string) {
     let thrown: any;
     try {
       password.verifySync("x", encoded);
     } catch (e) {
       thrown = e;
     }
-    expect(thrown?.code).toBe("PASSWORD_NO_SPACE_LEFT");
-    expect(thrown?.message).toContain("NoSpaceLeft");
-
-    await expect(password.verify("x", encoded)).rejects.toMatchObject({
-      code: "PASSWORD_NO_SPACE_LEFT",
-    });
+    expect({ encoded, code: thrown?.code }).toEqual({ encoded, code });
+    await expect(password.verify("x", encoded)).rejects.toMatchObject({ code });
   }
+
+  await expectCode(`$bcrypt$r=4$${salt24}$${hash23}`, "PASSWORD_NO_SPACE_LEFT");
+  await expectCode(`$bcrypt$r=4$${salt16}$${hash24}`, "PASSWORD_NO_SPACE_LEFT");
 
   // Extra `$`-separated fields after the hash are a structural error in
   // phc_format and must stay `InvalidEncoding`, not be misread as an
   // oversized hash.
-  for (const trailing of ["$xx", "$"]) {
-    const encoded = `$bcrypt$r=4$${salt16}$${hash23}${trailing}`;
-    let thrown: any;
-    try {
-      password.verifySync("x", encoded);
-    } catch (e) {
-      thrown = e;
-    }
-    expect(thrown?.code).toBe("PASSWORD_INVALID_ENCODING");
-    await expect(password.verify("x", encoded)).rejects.toMatchObject({
-      code: "PASSWORD_INVALID_ENCODING",
-    });
-  }
+  await expectCode(`$bcrypt$r=4$${salt16}$${hash23}$xx`, "PASSWORD_INVALID_ENCODING");
+  await expectCode(`$bcrypt$r=4$${salt16}$${hash23}$`, "PASSWORD_INVALID_ENCODING");
+
+  // phc_format parses fields in order; an oversized field surfaces
+  // `NoSpaceLeft` before the leftover-token check runs, so a trailing
+  // segment does not mask it.
+  await expectCode(`$bcrypt$r=4$${salt24}$${hash23}$xx`, "PASSWORD_NO_SPACE_LEFT");
+  await expectCode(`$bcrypt$r=4$${salt16}$${hash24}$xx`, "PASSWORD_NO_SPACE_LEFT");
 });
 
 test("bcrypt pre-hashing does not break compatibility across Bun versions", async () => {

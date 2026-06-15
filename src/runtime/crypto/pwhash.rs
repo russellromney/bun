@@ -407,15 +407,17 @@ pub mod bcrypt {
             return Err(invalid());
         }
 
-        // salt / hash — standard no-pad base64.
-        let (salt_b64, hash_b64) = rest.split_once('$').ok_or_else(invalid)?;
-        // phc_format.deserialize rejects leftover `$`-separated tokens after
-        // the last struct field as `InvalidEncoding`; `split_once` leaves any
-        // trailing segments in `hash_b64`, so reject them here before the size
-        // check below can misclassify the inflated length as `NoSpaceLeft`.
-        if hash_b64.contains('$') {
-            return Err(invalid());
-        }
+        // salt / hash — standard no-pad base64. phc_format.deserialize tokenizes
+        // on `$` and parses struct fields in order, rejecting leftover tokens as
+        // `InvalidEncoding` only after every field has been consumed; split any
+        // trailing segment off `hash_b64` here so the per-field size checks run
+        // on the isolated hash token, and defer the leftover-token rejection
+        // until after them so an oversized field still surfaces `NoSpaceLeft`.
+        let (salt_b64, rest) = rest.split_once('$').ok_or_else(invalid)?;
+        let (hash_b64, extra) = match rest.split_once('$') {
+            Some((h, _)) => (h, true),
+            None => (rest, false),
+        };
         let decoder = &bun_base64::zig_base64::STANDARD_NO_PAD.decoder;
 
         // phc_format.BinValue(N).fromB64 semantics: `calcSizeForSlice` failure
@@ -449,6 +451,10 @@ pub mod bcrypt {
         decoder
             .decode(&mut expected, hash_b64.as_bytes())
             .map_err(|_| invalid())?;
+
+        if extra {
+            return Err(invalid());
+        }
 
         // The crate's raw `bcrypt()` asserts `cost < 32`, so reject the
         // out-of-range tail here rather than panic. (Values <4 or ≥32 never
