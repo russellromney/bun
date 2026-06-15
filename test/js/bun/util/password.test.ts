@@ -262,6 +262,20 @@ test("bcrypt pre-hashing does not break compatibility across Bun versions", asyn
   expect(await password.verify(secret, hash)).toBeTrue();
 });
 
+test("bcrypt PHC-format hashes accept the optional v= segment", async () => {
+  // $bcrypt$r=4$<salt>$<hash> derived from the modular-crypt hash of "hello" at cost 4.
+  const salt = "4/oeh1q2vAEB2Dxgn4q/UQ";
+  const dk = "sf22627z3ZZphiGZ2tAwdvbTHXSRk5g";
+  for (const v of ["", "v=19$", "v=2b$"]) {
+    const hash = `$bcrypt$${v}r=4$${salt}$${dk}`;
+    expect(password.verifySync("hello", hash)).toBeTrue();
+    expect(password.verifySync("wrong", hash)).toBeFalse();
+    expect(password.verifySync("hello", hash, "bcrypt")).toBeTrue();
+    expect(await password.verify("hello", hash)).toBeTrue();
+    expect(await password.verify("wrong", hash)).toBeFalse();
+  }
+});
+
 test("argon2 memoryCost at the 8 minimum is encoded faithfully (regression for #30960)", async () => {
   const hashed = await password.hash("test", {
     algorithm: "argon2id",
