@@ -110,7 +110,11 @@ members = [
 # `[profile]` section is ignored and its heavy dev-dependencies (criterion,
 # html5ever) never enter `Cargo.lock`. The source is fetched into `vendor/`
 # by the build system (`scripts/build/deps/lolhtml.ts`) before cargo runs.
-exclude = ["vendor"]
+#
+# `src/deps/` holds checked-in patched third-party crates consumed via
+# `[patch.crates-io]` below; they stay outside the workspace for the same
+# reasons (no `[profile]` inheritance, no dev-dependency leakage).
+exclude = ["vendor", "src/deps"]
 
 [workspace.package]
 version = "0.0.0"
