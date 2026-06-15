@@ -21,10 +21,9 @@ pub const MIN_HASH_LENGTH: u32 = 4;
 /// Maximum digest size in bytes.
 pub const MAX_HASH_LENGTH: u32 = 0xFFFF_FFFF;
 
-/// Minimum number of memory blocks (each of BLOCK_SIZE bytes).
-/// Bun patch: no longer enforced in `Context::new`; see src/deps/rust-argon2/README.md.
-#[allow(dead_code)]
-pub const MIN_MEMORY: u32 = 2 * SYNC_POINTS;
+// Bun patch: `MIN_MEMORY` removed; the floor is no longer enforced in
+// `Context::new` (see src/deps/rust-argon2/README.md). `memory_blocks` is
+// still clamped to `2 * SYNC_POINTS * lanes` there.
 
 /// Maximum number of memory blocks (each of BLOCK_SIZE bytes).
 #[cfg(target_pointer_width = "32")]
