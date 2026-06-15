@@ -1138,6 +1138,11 @@ impl Request {
                             Ok(()) => {}
                             Err(e) => bail!(Err(e)),
                         }
+                        // `clone_into` teed the source body; migrate the
+                        // source's parked tee branch out of `locked.readable`
+                        // (see the two-arg branch below). `do_clone` does
+                        // this via `sync_cloned_body_stream_caches`.
+                        request.check_body_stream_ref(global_this);
                         success = true;
                         cleanup(&mut req, body_seed_ptr, success);
                         return Ok(req);
@@ -1197,6 +1202,14 @@ impl Request {
                                     }
                                     Err(e) => bail!(Err(e)),
                                 }
+                                // `tee()` parked the source's branch in
+                                // `locked.readable`; migrate it into the
+                                // source's `js.gc.stream` (as `do_clone` does
+                                // via `sync_cloned_body_stream_caches`) so an
+                                // unreachable `Strong` isn't left buffering
+                                // every body chunk until the source is
+                                // finalized.
+                                request.check_body_stream_ref(global_this);
                                 fields.insert(Fields::Body);
                             }
                         }
@@ -1252,6 +1265,11 @@ impl Request {
                                     }
                                     Err(e) => bail!(Err(e)),
                                 }
+                                // See the `Request` branch above.
+                                <Response as BodyMixin>::check_body_stream_ref(
+                                    response,
+                                    global_this,
+                                );
                                 fields.insert(Fields::Body);
                             }
                         }
