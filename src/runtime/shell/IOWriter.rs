@@ -853,6 +853,9 @@ impl IOWriter {
         if err.get_errno() == E::EPIPE {
             s.flags.broken_pipe = true;
         }
+        if let Some(old) = s.err.take() {
+            old.deref();
+        }
         s.err = Some(err.to_shell_system_error());
         // Writers before writer_idx have already had their callback fired and
         // may have been freed; only notify the still-pending ones, dedup'd.
@@ -1153,6 +1156,9 @@ impl Drop for IOWriter {
         }
         if s.fd != Fd::INVALID {
             let _ = sys::close(s.fd);
+        }
+        if let Some(e) = s.err.take() {
+            e.deref();
         }
         s.writer
             .disable_keeping_process_alive(s.evtloop.as_event_loop_ctx());

@@ -845,6 +845,7 @@ impl Cmd {
                     Ok(f) => f,
                     Err(e) => {
                         let sys_err = e.to_shell_system_error();
+                        scopeguard::defer! { sys_err.deref(); }
                         return Ok(Some(Builtin::cmd_write_failing_error(
                             interp,
                             this,
@@ -987,6 +988,7 @@ impl Cmd {
         log!("cmd close buffered stdout");
         if let Some(e) = err {
             self.exit_code = Some(e.errno.unsigned_abs() as ExitCode);
+            e.deref();
         }
         let redirect = self.ast_node().redirect;
         let Exec::Subproc(sub) = &mut self.exec else {
@@ -1023,6 +1025,7 @@ impl Cmd {
         log!("cmd close buffered stderr");
         if let Some(e) = err {
             self.exit_code = Some(e.errno.unsigned_abs() as ExitCode);
+            e.deref();
         }
         let redirect = self.ast_node().redirect;
         let Exec::Subproc(sub) = &mut self.exec else {

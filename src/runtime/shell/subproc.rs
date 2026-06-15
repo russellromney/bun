@@ -1807,7 +1807,9 @@ impl CapturedWriter {
                 e.fd,
                 e.syscall
             );
-            self.err = Some(e);
+            if let Some(old) = self.err.replace(e) {
+                old.deref();
+            }
             // SAFETY: `parent_mut` recovers the embedding `PipeReader` via
             // `container_of`; raw-ptr form per `try_signal_done_to_cmd`
             // contract (no `&mut PipeReader` held across the Cmd re-entry).
@@ -1822,7 +1824,9 @@ impl CapturedWriter {
     }
 
     pub fn on_error(&mut self, err: &bun_sys::Error) {
-        self.err = Some(err.to_system_error());
+        if let Some(old) = self.err.replace(err.to_system_error()) {
+            old.deref();
+        }
     }
 
     pub fn on_close(&mut self) {
@@ -1839,8 +1843,9 @@ impl CapturedWriter {
 
 impl Drop for CapturedWriter {
     fn drop(&mut self) {
-        // `bun_sys::SystemError` strings drop themselves.
-        let _ = self.err.take();
+        if let Some(e) = self.err.take() {
+            e.deref();
+        }
         // self.writer Arc drops automatically.
     }
 }
@@ -2183,6 +2188,7 @@ impl PipeReader {
                             me.state = PipeReaderState::Err(Some(Box::new(e)));
                         }
                         old @ PipeReaderState::Err(_) => {
+                            e.deref();
                             me.state = old;
                         }
                         PipeReaderState::Pending => {
@@ -2327,10 +2333,10 @@ impl PipeReader {
             // SAFETY: see `arc_as_mut_ptr`; short-lived `&mut` for the
             // `state` write ends before `finish_after_state_set` re-enters.
             let me = unsafe { &mut *arc_as_mut_ptr(&guard) };
-            if let PipeReaderState::Done(buf) =
-                core::mem::replace(&mut me.state, PipeReaderState::Err(None))
-            {
-                drop(buf);
+            match core::mem::replace(&mut me.state, PipeReaderState::Err(None)) {
+                PipeReaderState::Done(buf) => drop(buf),
+                PipeReaderState::Err(Some(old)) => old.deref(),
+                PipeReaderState::Err(None) | PipeReaderState::Pending => {}
             }
             me.state = PipeReaderState::Err(Some(Box::new(err.to_system_error())));
         }
@@ -2417,7 +2423,9 @@ impl Drop for PipeReader {
         }
 
         if let PipeReaderState::Err(slot) = &mut self.state {
-            *slot = None;
+            if let Some(e) = slot.take() {
+                e.deref();
+            }
         }
 
         // buffered_output drops automatically.
