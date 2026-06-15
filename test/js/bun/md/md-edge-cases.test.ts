@@ -1107,6 +1107,25 @@ describe("pathological reference definition inputs", () => {
     expect(resolved).toContain('<a href="/url">text</a>');
     expect(resolved).toContain("[missing]");
   }, 90_000);
+
+  // Setext headings consume leading reference definitions before the underline
+  // is applied (consume_ref_defs_from_current_block). Duplicate labels in that
+  // run must still obey first-definition-wins and must not leak into the
+  // heading content.
+  test("duplicate reference definitions before a setext heading resolve to the first definition", () => {
+    const defs = Array.from({ length: 5 }, () => '[dup]: /u "t"').join("\n");
+    expect(Markdown.html(defs + "\nhello\n===\n\n[dup]\n")).toBe(
+      '<h1>hello</h1>\n<p><a href="/u" title="t">dup</a></p>\n',
+    );
+
+    expect(Markdown.html("[a]: /first\n[a]: /second\nheading\n===\n\n[a]\n")).toBe(
+      '<h1>heading</h1>\n<p><a href="/first">a</a></p>\n',
+    );
+
+    // A run of definitions that consumes every content line leaves only the
+    // underline, which becomes a paragraph rather than an empty heading.
+    expect(Markdown.html("[a]: /x\n[a]: /y\n===\n\n[a]\n")).toBe('<p>===</p>\n<p><a href="/x">a</a></p>\n');
+  });
 });
 
 // ============================================================================

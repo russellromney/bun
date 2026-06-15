@@ -962,13 +962,7 @@ impl Parser<'_> {
                 break;
             };
 
-            // Capture borrowed result fields before &mut self calls.
-            let raw_label: Box<[u8]> = Box::from(result.label);
-            let dest_dupe: Box<[u8]> = Box::from(result.dest);
-            let title_dupe: Box<[u8]> = Box::from(result.title);
-            let end_pos = result.end_pos;
-
-            let norm_label = self.normalize_label(&raw_label);
+            let norm_label = self.normalize_label(result.label);
             if norm_label.is_empty() {
                 break;
             }
@@ -977,6 +971,9 @@ impl Parser<'_> {
             let label = norm_label.into_boxed_slice();
             if !self.ref_def_labels.contains(&label) {
                 let _ = self.ref_def_labels.insert(&label);
+                // Dupe dest and title since they point into self.buffer which gets reused
+                let dest_dupe: Box<[u8]> = Box::from(result.dest);
+                let title_dupe: Box<[u8]> = Box::from(result.title);
                 self.ref_defs.push(crate::ref_defs::RefDef {
                     label,
                     dest: dest_dupe,
@@ -985,16 +982,18 @@ impl Parser<'_> {
             }
 
             let mut newlines: u32 = 0;
-            for &mc in &merged[pos..end_pos] {
+            for &mc in &merged[pos..result.end_pos] {
                 if mc == b'\n' {
                     newlines += 1;
                 }
             }
-            if end_pos >= merged.len() && (end_pos == pos || merged[end_pos - 1] != b'\n') {
+            if result.end_pos >= merged.len()
+                && (result.end_pos == pos || merged[result.end_pos - 1] != b'\n')
+            {
                 newlines += 1;
             }
             lines_consumed += newlines;
-            pos = end_pos;
+            pos = result.end_pos;
         }
 
         // Restore buffer for reuse.
