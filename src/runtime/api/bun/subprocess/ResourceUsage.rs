@@ -17,24 +17,21 @@ impl ResourceUsage {
     }
 
     #[bun_jsc::host_fn(getter)]
-    pub fn get_cpu_time(this: &Self, global: &JSGlobalObject) -> JsResult<JSValue> {
+    pub fn get_cpu_time(this: &Self, global: &JSGlobalObject) -> JSValue {
         let cpu = JSValue::create_empty_object_with_null_prototype(global);
         let rusage = &this.rusage;
 
-        let usr_time =
-            JSValue::from_timeval_no_truncate(global, rusage.utime_usec(), rusage.utime_sec())?;
-        let sys_time =
-            JSValue::from_timeval_no_truncate(global, rusage.stime_usec(), rusage.stime_sec())?;
+        // CPU time in microseconds, as a JS number to match the documented
+        // `Bun.ResourceUsage` type and `process.resourceUsage()`. Microseconds
+        // fit exactly in a double (2^53 us is ~285 years of CPU time).
+        let user = rusage.utime_sec() * 1_000_000 + rusage.utime_usec();
+        let system = rusage.stime_sec() * 1_000_000 + rusage.stime_usec();
 
-        cpu.put(global, b"user", usr_time);
-        cpu.put(global, b"system", sys_time);
-        cpu.put(
-            global,
-            b"total",
-            JSValue::big_int_sum(global, usr_time, sys_time),
-        );
+        cpu.put(global, b"user", JSValue::js_number(user as f64));
+        cpu.put(global, b"system", JSValue::js_number(system as f64));
+        cpu.put(global, b"total", JSValue::js_number((user + system) as f64));
 
-        Ok(cpu)
+        cpu
     }
 
     #[bun_jsc::host_fn(getter)]

@@ -1101,3 +1101,34 @@ describe("option combinations", () => {
     expect(await proc.exited).toBe(0);
   });
 });
+
+describe("resourceUsage", () => {
+  // https://github.com/oven-sh/bun/issues/32254
+  it("cpuTime fields are numbers (microseconds), not bigint", async () => {
+    await using proc = Bun.spawn({
+      cmd: [bunExe(), "-e", "let x = 0; for (let i = 0; i < 1e6; i++) x += i;"],
+      env: bunEnv,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    const [, , exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    expect(exitCode).toBe(0);
+
+    const usage = proc.resourceUsage();
+    expect(usage).toBeDefined();
+    const { user, system, total } = usage!.cpuTime;
+
+    expect(typeof user).toBe("number");
+    expect(typeof system).toBe("number");
+    expect(typeof total).toBe("number");
+
+    expect(user).toBeGreaterThanOrEqual(0);
+    expect(system).toBeGreaterThanOrEqual(0);
+    expect(total).toBe(user + system);
+
+    // cpuTime used to be BigInt, which made JSON.stringify throw.
+    const metrics = { user, system, total };
+    expect(JSON.parse(JSON.stringify(metrics))).toEqual(metrics);
+  });
+});
