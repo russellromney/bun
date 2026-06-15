@@ -100,7 +100,11 @@ describe.if(isPosix)("cwd deleted before startup", () => {
       const gone = String(dir);
 
       await using proc = Bun.spawn({
-        cmd: ["/bin/sh", "-c", `cd "${gone}" && rmdir "${gone}" && exec "${bunExe()}" ${cmd.map(a => `'${a}'`).join(" ")}`],
+        cmd: [
+          "/bin/sh",
+          "-c",
+          `cd "${gone}" && rmdir "${gone}" && exec "${bunExe()}" ${cmd.map(a => `'${a}'`).join(" ")}`,
+        ],
         env: bunEnv,
         stdout: "pipe",
         stderr: "pipe",
