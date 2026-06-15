@@ -1,0 +1,42 @@
+[package]
+edition = "2021"
+name = "rust-argon2"
+version = "3.0.0"
+authors = ["Martijn Rijkeboer <mrr@sru-systems.com>"]
+description = "Rust implementation of the Argon2 password hashing function."
+homepage = "https://github.com/sru-systems/rust-argon2"
+documentation = "https://docs.sru-systems.com/rust-argon2/3.0.0/argon2/"
+keywords = [
+    "argon2",
+    "argon2d",
+    "argon2i",
+    "hash",
+    "password",
+]
+license = "MIT/Apache-2.0"
+repository = "https://github.com/sru-systems/rust-argon2"
+
+[features]
+default = ["crossbeam-utils"]
+
+[lib]
+name = "argon2"
+path = "src/lib.rs"
+
+[dependencies.base64]
+version = "0.22"
+
+[dependencies.blake2b_simd]
+version = "1.0"
+
+[dependencies.constant_time_eq]
+version = "0.4.2"
+
+[dependencies.crossbeam-utils]
+version = "0.8"
+optional = true
+
+[dependencies.serde]
+version = "1.0"
+features = ["derive"]
+optional = true

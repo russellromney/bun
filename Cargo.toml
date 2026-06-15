@@ -446,3 +446,9 @@ bun_transpiler = { path = "src/transpiler" }
 
 [profile.release.package.bun_react_compiler]
 opt-level = "s"
+
+[patch.crates-io]
+# Relaxes the `mem_cost >= 8 * lanes` floor so hashes produced by earlier Bun
+# releases (Zig stdlib argon2 accepted any `memoryCost >= 1`) remain verifiable.
+# See src/deps/rust-argon2/README.md.
+rust-argon2 = { path = "src/deps/rust-argon2" }
