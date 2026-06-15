@@ -1753,7 +1753,7 @@ impl<'a> Visitor<'a> {
                 let prop_len = e_obj.properties.len_u32() as usize;
                 // `EntryDataMapList` is a `Vec<MapEntry>`, so push whole entries.
                 let mut map_data: EntryDataMapList = Vec::with_capacity(prop_len);
-                let mut expansion_keys: Vec<MapEntry> = Vec::with_capacity(prop_len);
+                let mut expansion_keys: Vec<u32> = Vec::new();
                 let mut is_conditional_sugar = false;
                 first_token.loc = expr.loc;
                 first_token.len = 1;
@@ -1797,11 +1797,7 @@ impl<'a> Visitor<'a> {
 
                     // safe to use "/" on windows. exports in package.json does not use "\\"
                     if strings::ends_with(&key, b"/") || strings::contains_char(&key, b'*') {
-                        expansion_keys.push(MapEntry {
-                            value: value.clone(),
-                            key: key.clone(),
-                            key_range,
-                        });
+                        expansion_keys.push(map_data.len() as u32);
                     }
 
                     map_data.push(MapEntry {
@@ -1811,13 +1807,12 @@ impl<'a> Visitor<'a> {
                     });
                 }
 
-                // this leaks a lil, but it's fine.
-                // (Rust: Vec already sized correctly via push)
-
                 // Let expansionKeys be the list of keys of matchObj either ending in "/"
                 // or containing only a single "*", sorted by the sorting function
                 // PATTERN_KEY_COMPARE which orders in descending order of specificity.
-                expansion_keys.sort_by(|a, b| strings::glob_length_compare(&a.key, &b.key));
+                expansion_keys.sort_by(|&a, &b| {
+                    strings::glob_length_compare(&map_data[a as usize].key, &map_data[b as usize].key)
+                });
 
                 return Entry {
                     data: EntryData::Map(EntryDataMap {
@@ -1881,7 +1876,10 @@ pub enum EntryDataTag {
 #[derive(Clone)]
 pub struct EntryDataMap {
     // This is not a std.ArrayHashMap because we also store the key_range which is a little weird
-    pub expansion_keys: Box<[MapEntry]>,
+    // expansion_keys holds sorted indices into `list`. The Zig original stored a second MapEntry
+    // slice whose payload pointers aliased `list`; indices express that same sharing without a
+    // deep clone of each wildcard key's subtree.
+    pub expansion_keys: Box<[u32]>,
     pub list: EntryDataMapList,
 }
 
@@ -2416,7 +2414,8 @@ impl<'a> ESModule<'a> {
 
         if let EntryData::Map(map) = &match_obj.data {
             let expansion_keys = &map.expansion_keys;
-            for expansion in expansion_keys.iter() {
+            for &idx in expansion_keys.iter() {
+                let expansion = &map.list[idx as usize];
                 // If expansionKey contains "*", set patternBase to the substring of
                 // expansionKey up to but excluding the first "*" character
                 if let Some(star) = strings::index_of_char(&expansion.key, b'*') {
