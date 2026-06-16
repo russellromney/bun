@@ -28,7 +28,7 @@
 const { URL, URLSearchParams } = globalThis;
 const [domainToASCII, domainToUnicode] = $cpp("NodeURL.cpp", "Bun::createNodeURLBinding");
 const { urlToHttpOptions } = require("internal/url");
-const { validateString } = require("internal/validators");
+const { validateString, validateObject } = require("internal/validators");
 
 function Url() {
   this.protocol = null;
@@ -461,8 +461,8 @@ function getHostname(self, rest, hostname: string, url) {
 }
 
 // format a parsed object into a url string
-declare function urlFormat(urlObject: string | URL | Url): string;
-function urlFormat(urlObject: unknown) {
+declare function urlFormat(urlObject: string | URL | Url, options?: object): string;
+function urlFormat(urlObject: unknown, options?: unknown) {
   /*
    * ensure it's an object, and not a string url.
    * If it's an obj, this is a no-op.
@@ -474,12 +474,77 @@ function urlFormat(urlObject: unknown) {
     // NOTE: $isObject returns true for functions
   } else if (typeof urlObject !== "object" || urlObject === null) {
     throw $ERR_INVALID_ARG_TYPE("urlObject", ["Object", "string"], urlObject);
+  } else if (urlObject instanceof URL) {
+    let fragment = true;
+    let unicode = false;
+    let search = true;
+    let auth = true;
+
+    if (options) {
+      validateObject(options, "options");
+
+      if (options.fragment != null) {
+        fragment = Boolean(options.fragment);
+      }
+      if (options.unicode != null) {
+        unicode = Boolean(options.unicode);
+      }
+      if (options.search != null) {
+        search = Boolean(options.search);
+      }
+      if (options.auth != null) {
+        auth = Boolean(options.auth);
+      }
+    }
+
+    return formatWHATWG(urlObject, auth, fragment, search, unicode);
   }
 
   if (!(urlObject instanceof Url)) {
     return Url.prototype.format.$call(urlObject);
   }
   return urlObject.format();
+}
+
+function formatWHATWG(urlObject: URL, auth: boolean, fragment: boolean, search: boolean, unicode: boolean) {
+  const href = urlObject.href;
+  const protocol = urlObject.protocol;
+
+  let ret = protocol;
+
+  // A URL has an authority component if its serialization has "//" directly
+  // after the scheme. Special-scheme URLs (http, https, ws, wss, ftp, file)
+  // always do; non-special URLs may or may not.
+  if (
+    href.length > protocol.length + 1 &&
+    href.$charCodeAt(protocol.length) === Char.FORWARD_SLASH &&
+    href.$charCodeAt(protocol.length + 1) === Char.FORWARD_SLASH
+  ) {
+    ret += "//";
+
+    const username = urlObject.username;
+    const password = urlObject.password;
+    if (auth && (username || password)) {
+      ret += username;
+      if (password) ret += ":" + password;
+      ret += "@";
+    }
+
+    let hostname = urlObject.hostname;
+    if (unicode && hostname && hostname.$charCodeAt(0) !== Char.LEFT_SQUARE_BRACKET) {
+      hostname = domainToUnicode(hostname);
+    }
+    ret += hostname;
+
+    const port = urlObject.port;
+    if (port) ret += ":" + port;
+  }
+
+  ret += urlObject.pathname;
+  if (search) ret += urlObject.search;
+  if (fragment) ret += urlObject.hash;
+
+  return ret;
 }
 
 Url.prototype.format = function format() {
