@@ -2170,7 +2170,6 @@ impl BlobExt for Blob {
         None
     }
 
-    // TODO: Move this to a separate `File` object or BunFile
     fn get_name(&self, _: JSValue, global_this: &JSGlobalObject) -> JsResult<JSValue> {
         Ok(match self.get_name_string() {
             Some(name) => name.to_js(global_this)?,
@@ -2218,7 +2217,6 @@ impl BlobExt for Blob {
         }
     }
 
-    // TODO: Move this to a separate `File` object or BunFile
     fn get_last_modified(&self, _: &JSGlobalObject) -> JSValue {
         if let Some(store) = self.store.get() {
             if matches!(store.data, store::Data::File(_)) {
@@ -3744,6 +3742,13 @@ impl BlobExt for Blob {
             // SAFETY: `self` is a heap-allocated *mut Blob (see `Blob::new`); the
             // C++ side wraps it in a JSS3File without taking a second ref.
             return crate::webcore::s3_file::to_js_unchecked(global_object, this);
+        }
+
+        // `name` and `lastModified` live on File.prototype, not Blob.prototype.
+        // Route `new File()` results, `Bun.file()` (file-backed store) and their
+        // slices through the File structure so those accessors are reachable.
+        if self.is_jsdom_file.get() || self.is_bun_file() {
+            return dom_file_to_js_unchecked(global_object, this);
         }
 
         js::to_js_unchecked(global_object, this)
@@ -5594,6 +5599,42 @@ fn write_bytes_to_file_fast<const NEEDS_OPEN: bool>(
 // JSDOMFile constructor
 // ──────────────────────────────────────────────────────────────────────────
 
+bun_jsc::jsc_abi_extern! {
+    // Defined in JSDOMFile.cpp. Wraps `blob` in a JSBlob whose structure uses
+    // File.prototype (so `name` / `lastModified` are reachable). Ownership of
+    // `blob` transfers to the wrapper; same contract as `Blob__create`.
+    safe fn BUN__createJSDOMFileUnsafely(
+        global: &JSGlobalObject,
+        blob: *mut core::ffi::c_void,
+    ) -> JSValue;
+}
+
+pub fn dom_file_to_js_unchecked(global: &JSGlobalObject, this: *mut Blob) -> JSValue {
+    BUN__createJSDOMFileUnsafely(global, this.cast::<core::ffi::c_void>())
+}
+
+// C++ side declares these in JSDOMFile.cpp (File.prototype.name / .lastModified).
+bun_jsc::jsc_host_abi! {
+    #[unsafe(no_mangle)]
+    pub unsafe fn JSDOMFile__getName(this: &Blob, this_value: JSValue, global: &JSGlobalObject) -> JSValue {
+        bun_jsc::host_fn::host_fn_getter_this_shared(this, this_value, global, |t, v, g| Blob::get_name(t, v, g))
+    }
+}
+
+bun_jsc::jsc_host_abi! {
+    #[unsafe(no_mangle)]
+    pub unsafe fn JSDOMFile__setName(this: &Blob, this_value: JSValue, global: &JSGlobalObject, value: JSValue) -> bool {
+        bun_jsc::host_fn::host_fn_setter_this_shared(this, this_value, global, value, |t, tv, g, v| Blob::set_name(t, tv, g, v))
+    }
+}
+
+bun_jsc::jsc_host_abi! {
+    #[unsafe(no_mangle)]
+    pub unsafe fn JSDOMFile__getLastModified(this: &Blob, global: &JSGlobalObject) -> JSValue {
+        bun_jsc::host_fn::host_fn_getter_shared(this, global, |t, g| Blob::get_last_modified(t, g))
+    }
+}
+
 // C++ side declares `extern "C" SYSV_ABI void* JSDOMFile__construct(...)` (JSDOMFile.cpp).
 bun_jsc::jsc_host_abi! {
     #[unsafe(no_mangle)]
@@ -7050,24 +7091,6 @@ impl Default for Inline {
             len: 0,
             was_string: false,
         }
-    }
-}
-
-// ──────────────────────────────────────────────────────────────────────────
-// JSDOMFile__hasInstance / FileOpener / FileCloser
-// ──────────────────────────────────────────────────────────────────────────
-
-// C++ side declares `extern "C" SYSV_ABI bool JSDOMFile__hasInstance(...)` (JSDOMFile.cpp).
-bun_jsc::jsc_host_abi! {
-    #[unsafe(no_mangle)]
-    pub unsafe fn JSDOMFile__hasInstance(
-        _a: JSValue,
-        _b: &JSGlobalObject,
-        value: JSValue,
-    ) -> bool {
-        jsc::mark_binding();
-        let Some(blob) = value.as_class_ref::<Blob>() else { return false };
-        blob.is_jsdom_file.get()
     }
 }
 

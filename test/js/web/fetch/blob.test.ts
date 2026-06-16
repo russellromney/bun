@@ -207,6 +207,8 @@ test("new Blob('123') is NOT supported", async () => {
 });
 
 test("blob: can set name property #10178", () => {
+  // `name` is not an accessor on Blob.prototype (it lives on File.prototype),
+  // so assigning to it creates a plain own property, matching Node and browsers.
   const blob = new Blob([Buffer.from("Hello, World")]);
   // @ts-expect-error
   expect(blob.name).toBeUndefined();
@@ -217,7 +219,7 @@ test("blob: can set name property #10178", () => {
   // @ts-expect-error
   blob.name = 10;
   // @ts-expect-error
-  expect(blob.name).toBe("logo.svg");
+  expect(blob.name).toBe(10);
   Object.defineProperty(blob, "name", {
     value: 42,
     writable: false,
@@ -239,7 +241,7 @@ test("blob: can set name property #10178", () => {
   // @ts-expect-error
   myBlob.name = 10;
   // @ts-expect-error
-  expect(myBlob.name).toBe("logo.svg");
+  expect(myBlob.name).toBe(10);
   Object.defineProperty(myBlob, "name", {
     value: 42,
     writable: false,
@@ -258,6 +260,41 @@ test("blob: can set name property #10178", () => {
   expect(myOtherBlob.name).toBe("logo.svg");
   myOtherBlob.name = 10;
   expect(myOtherBlob.name).toBe(10);
+});
+
+// https://github.com/oven-sh/bun/issues/20700
+// https://github.com/oven-sh/bun/issues/14257
+test("name and lastModified live on File.prototype, not Blob.prototype", () => {
+  expect("name" in new Blob()).toBe(false);
+  expect("lastModified" in new Blob()).toBe(false);
+  expect(Object.getOwnPropertyNames(Blob.prototype).sort()).not.toContain("name");
+  expect(Object.getOwnPropertyNames(Blob.prototype).sort()).not.toContain("lastModified");
+
+  expect(File.prototype).not.toBe(Blob.prototype);
+  expect(Object.getPrototypeOf(File.prototype)).toBe(Blob.prototype);
+  expect(Object.getOwnPropertyNames(File.prototype)).toContain("name");
+  expect(Object.getOwnPropertyNames(File.prototype)).toContain("lastModified");
+  expect(File.prototype.constructor).toBe(File);
+  expect(Object.getPrototypeOf(File)).toBe(Blob);
+
+  const file = new File(["foo"], "bar.txt");
+  expect("name" in file).toBe(true);
+  expect("lastModified" in file).toBe(true);
+  expect(file.name).toBe("bar.txt");
+  expect(typeof file.lastModified).toBe("number");
+  expect(Object.getPrototypeOf(file)).toBe(File.prototype);
+  expect(file instanceof File).toBe(true);
+  expect(file instanceof Blob).toBe(true);
+  expect(file[Symbol.toStringTag]).toBe("File");
+
+  expect(new Blob() instanceof File).toBe(false);
+
+  // Bun.file() keeps its documented .name / .lastModified via File.prototype.
+  const bunFile = Bun.file(import.meta.path);
+  expect("name" in bunFile).toBe(true);
+  expect(bunFile.name).toBe(import.meta.path);
+  expect(typeof bunFile.lastModified).toBe("number");
+  expect(bunFile instanceof Blob).toBe(true);
 });
 
 test("#12894", () => {
