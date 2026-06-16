@@ -4072,38 +4072,12 @@ impl VirtualMachine {
             top_level_dir
         };
 
-        // Entry-point fast path: the process entry point (`source == MAIN_FILE_NAME`)
-        // resolves a canonicalized absolute specifier, so its parent directory need
-        // not be enumerated to find it. Hint the resolver with this exact path to
-        // `stat` the single file instead (see `Resolver::entry_point_hint`); the
-        // guard resets the hint on every exit so ordinary imports keep reading
-        // directories normally.
-        let is_main_entry =
-            source == MAIN_FILE_NAME && bun_paths::is_absolute(normalized_specifier);
-        if is_main_entry {
-            // SAFETY: `normalized_specifier` is borrowed for this `_resolve` call
-            // and the guard below clears the hint before `_resolve` returns, so
-            // the lifetime-erased slice never outlives its backing borrow.
-            self.transpiler.resolver.entry_point_hint =
-                Some(unsafe { bun_ptr::detach_lifetime(normalized_specifier) });
+        if source == MAIN_FILE_NAME && bun_paths::is_absolute(normalized_specifier) {
+            self.transpiler.resolver.entry_point_hint = Some(Box::from(normalized_specifier));
         }
-        let self_ptr: *mut Self = self;
-        let _entry_hint_guard = scopeguard::guard((), move |()| {
-            if is_main_entry {
-                // SAFETY: `self_ptr` is the live VM for the duration of `_resolve`.
-                // It is a `Copy` raw pointer, so the guard does not borrow `self`
-                // away from the resolve loop below.
-                unsafe {
-                    (*self_ptr).transpiler.resolver.entry_point_hint = None;
-                }
-            }
-        });
 
-        // A `loop`
-        // returning the resolver result; `retry_on_not_found` is consumed on
-        // the first miss.
         let mut retry_on_not_found = bun_paths::is_absolute(source_to_use);
-        let result: bun_resolver::Result = loop {
+        let resolved: Result<bun_resolver::Result, bun_core::Error> = loop {
             let import_kind = if is_esm {
                 bun_ast::ImportKind::Stmt
             } else {
@@ -4116,11 +4090,11 @@ impl VirtualMachine {
                 import_kind,
                 global_cache,
             ) {
-                ResultUnion::Success(r) => break r,
-                ResultUnion::Failure(e) => return Err(e),
+                ResultUnion::Success(r) => break Ok(r),
+                ResultUnion::Failure(e) => break Err(e),
                 ResultUnion::Pending(_) | ResultUnion::NotFound => {
                     if !retry_on_not_found {
-                        return Err(bun_core::err!("ModuleNotFound"));
+                        break Err(bun_core::err!("ModuleNotFound"));
                     }
                     retry_on_not_found = false;
 
@@ -4130,7 +4104,7 @@ impl VirtualMachine {
                     let buster_name: &[u8] = if bun_paths::is_absolute(normalized_specifier) {
                         if let Some(dir) = bun_paths::dirname(normalized_specifier) {
                             if dir.len() > buf.len() {
-                                return Err(bun_core::err!("ModuleNotFound"));
+                                break Err(bun_core::err!("ModuleNotFound"));
                             }
                             // Normalized without trailing slash.
                             bun_paths::string_paths::normalize_slashes_only(
@@ -4151,7 +4125,7 @@ impl VirtualMachine {
                         // If the specifier is too long to join, it can't name
                         // a real directory — skip the cache bust and fail.
                         if source_to_use.len() + normalized_specifier.len() + 4 >= buf.len() {
-                            return Err(bun_core::err!("ModuleNotFound"));
+                            break Err(bun_core::err!("ModuleNotFound"));
                         }
                         let parts: [&[u8]; 3] = [
                             source_to_use,
@@ -4170,10 +4144,13 @@ impl VirtualMachine {
                     ) {
                         continue;
                     }
-                    return Err(bun_core::err!("ModuleNotFound"));
+                    break Err(bun_core::err!("ModuleNotFound"));
                 }
             }
         };
+
+        self.transpiler.resolver.entry_point_hint = None;
+        let result = resolved?;
 
         if !self.macro_mode {
             self.has_any_macro_remappings =
