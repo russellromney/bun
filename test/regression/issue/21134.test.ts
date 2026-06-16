@@ -23,7 +23,7 @@ function errorInfo(code: string) {
   return `try { eval(${JSON.stringify(code)}) } catch (e) { console.log(JSON.stringify({ line: e.line, column: e.column, message: e.message, stack: e.stack })); }`;
 }
 
-describe("error location for iterator protocol on null/undefined", () => {
+describe.concurrent("error location for iterator protocol on null/undefined", () => {
   test("for-of", async () => {
     const source = `console.log("sentinel-before");\nfor (const b of null) {}\n`;
     const { stdout, exitCode } = await run(errorInfo(source));
