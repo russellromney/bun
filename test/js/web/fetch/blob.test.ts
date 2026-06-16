@@ -308,20 +308,12 @@ test("File.prototype.constructor is set before the File global is touched", asyn
   // Bun.file() creates an instance with File.prototype before anything reads
   // globalThis.File; .constructor must still resolve to File, not Blob.
   await using proc = Bun.spawn({
-    cmd: [
-      bunExe(),
-      "-e",
-      `const c = Bun.file("/tmp/x").constructor; console.log(c.name, c === File);`,
-    ],
+    cmd: [bunExe(), "-e", `const c = Bun.file("/tmp/x").constructor; console.log(c.name, c === File);`],
     env: bunEnv,
     stdout: "pipe",
     stderr: "pipe",
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    proc.stdout.text(),
-    proc.stderr.text(),
-    proc.exited,
-  ]);
+  const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
   expect(stderr).toBe("");
   expect(stdout.trim()).toBe("File true");
   expect(exitCode).toBe(0);

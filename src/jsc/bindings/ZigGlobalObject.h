@@ -540,7 +540,7 @@ public:
     V(public, LazyPropertyOfGlobalObject<Structure>, m_JSS3FileStructure)                                    \
     V(public, LazyPropertyOfGlobalObject<Structure>, m_S3ErrorStructure)                                     \
                                                                                                              \
-    V(public, JSC::LazyClassStructure, m_JSDOMFileClassStructure)                                           \
+    V(public, JSC::LazyClassStructure, m_JSDOMFileClassStructure)                                            \
     V(public, JSC::LazyClassStructure, m_JSStatsClassStructure)                                              \
     V(public, JSC::LazyClassStructure, m_JSStatsBigIntClassStructure)                                        \
     V(public, JSC::LazyClassStructure, m_JSStatFSClassStructure)                                             \
