@@ -2043,9 +2043,13 @@ pub(crate) fn get_embedded_files(global_this: &JSGlobalObject, _: &JSObject) -> 
         // We call .dupe() on this to ensure that we don't return a blob that might get freed later.
         let blob = Blob::new(input_blob.dupe_with_content_type(true));
         // SAFETY: `Blob::new` returned a fresh heap allocation.
-        unsafe { (*blob).name.set(input_blob.name.get().dupe_ref()) };
-        // SAFETY: `blob` is heap-allocated and lives until JS owns it via to_js.
-        array.put_index(global_this, i as u32, unsafe { (*blob).to_js(global_this) })?;
+        unsafe {
+            (*blob).name.set(input_blob.name.get().dupe_ref());
+            (*blob).calculate_estimated_byte_size();
+        };
+        // Embedded files expose `.name`, which lives on File.prototype.
+        let blob_js = crate::webcore::blob::dom_file_to_js_unchecked(global_this, blob);
+        array.put_index(global_this, i as u32, blob_js)?;
     }
 
     Ok(array)
@@ -3003,7 +3007,7 @@ mod stdio_stores {
     use super::*;
     use crate::node::types::PathOrFileDescriptor;
     use crate::webcore::blob::store::{Data, File as FileStore};
-    use crate::webcore::blob::{Blob, BlobExt as _, Store, StoreRef};
+    use crate::webcore::blob::{Blob, Store, StoreRef};
 
     thread_local! {
         static STDIN: core::cell::RefCell<Option<StoreRef>> = const { core::cell::RefCell::new(None) };
@@ -3050,8 +3054,9 @@ mod stdio_stores {
             s.as_ref().unwrap().clone()
         });
         let blob = Blob::new(Blob::init_with_store(store, global_this));
-        // SAFETY: `Blob::new` heap-allocates; the JS wrapper takes ownership.
-        unsafe { (&*blob).to_js(global_this) }
+        // Bun.stdin/stdout/stderr are typed as BunFile; route through the
+        // File structure so `.name` / `.lastModified` stay reachable.
+        crate::webcore::blob::dom_file_to_js_unchecked(global_this, blob)
     }
 
     pub(super) fn stdin(global_this: &JSGlobalObject) -> JSValue {

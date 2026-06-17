@@ -319,6 +319,13 @@ test("Body.blob() returns a plain Blob even when the body is a File", async () =
     expect("name" in result).toBe(false);
     expect(result[Symbol.toStringTag]).toBe("Blob");
   }
+
+  // structuredClone of that result must also be a plain Blob.
+  const b = await new Response(new File(["hello"], "x.txt")).blob();
+  const cloned = structuredClone(b);
+  expect(Object.getPrototypeOf(cloned)).toBe(Blob.prototype);
+  expect(cloned instanceof File).toBe(false);
+  expect(Bun.inspect(b).startsWith("Blob")).toBe(true);
 });
 
 test("File.prototype.constructor is set before the File global is touched", async () => {
