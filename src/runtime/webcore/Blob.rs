@@ -2014,6 +2014,7 @@ impl BlobExt for Blob {
         // https://w3c.github.io/FileAPI/#slice-method-algo returns a new Blob,
         // not a File, so drop the File marker carried over by dupe().
         blob.is_jsdom_file.set(false);
+        blob.last_modified.set(0.0);
         blob.offset.set(offset);
         blob.size.set(len);
 
@@ -2470,6 +2471,11 @@ impl BlobExt for Blob {
             }
             _ => {
                 blob = Blob::get::<false, true>(global_this, args[0])?;
+                // new Blob(parts) always produces a Blob, never a File; drop
+                // any File marker / lastModified carried over from a
+                // single-Blob-part fast-path dupe().
+                blob.is_jsdom_file.set(false);
+                blob.last_modified.set(0.0);
 
                 if args.len() > 1 {
                     let options = args[1];

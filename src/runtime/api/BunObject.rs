@@ -2045,6 +2045,7 @@ pub(crate) fn get_embedded_files(global_this: &JSGlobalObject, _: &JSObject) -> 
         // SAFETY: `Blob::new` returned a fresh heap allocation.
         unsafe {
             (*blob).name.set(input_blob.name.get().dupe_ref());
+            (*blob).is_jsdom_file.set(true);
             (*blob).calculate_estimated_byte_size();
         };
         // Embedded files expose `.name`, which lives on File.prototype.
