@@ -1220,7 +1220,8 @@ impl NodeHTTPResponse {
             last
         );
 
-        self.bytes_read.set(self.bytes_read.get().saturating_add(chunk.len()));
+        self.bytes_read
+            .set(self.bytes_read.get().saturating_add(chunk.len()));
         self.buffered_request_body_data_during_pause
             .with_mut(|b| b.append_slice(chunk));
         if last {
@@ -1328,7 +1329,8 @@ impl NodeHTTPResponse {
             last as u8
         );
 
-        self.bytes_read.set(self.bytes_read.get().saturating_add(chunk.len()));
+        self.bytes_read
+            .set(self.bytes_read.get().saturating_add(chunk.len()));
         self.on_data_or_aborted(chunk, last, AbortEvent::None, self.get_this_value());
     }
 

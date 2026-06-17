@@ -1036,9 +1036,7 @@ const NodeHTTPServerSocket = class Socket extends Duplex {
 
   get bytesRead() {
     const handle = this[kHandle];
-    return handle
-      ? (handle.response?.getBytesRead?.() ?? this[kBytesRead] ?? 0)
-      : (this[kBytesRead] ?? 0);
+    return handle ? (handle.response?.getBytesRead?.() ?? this[kBytesRead] ?? 0) : (this[kBytesRead] ?? 0);
   }
 
   get bytesWritten() {
