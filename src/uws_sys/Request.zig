@@ -78,9 +78,6 @@ pub const Request = opaque {
         var ptr: [*]const u8 = undefined;
         return ptr[0..c.uws_req_get_parameter(req, @as(c_ushort, @intCast(index)), &ptr)];
     }
-    pub fn headersByteLength(req: *Request) usize {
-        return c.uws_req_get_headers_byte_length(req);
-    }
 };
 
 const c = struct {
@@ -92,7 +89,6 @@ const c = struct {
     pub extern fn uws_req_get_header(res: *Request, lower_case_header: [*]const u8, lower_case_header_length: usize, dest: *[*]const u8) usize;
     pub extern fn uws_req_get_query(res: *Request, key: [*c]const u8, key_length: usize, dest: *[*]const u8) usize;
     pub extern fn uws_req_get_parameter(res: *Request, index: c_ushort, dest: *[*]const u8) usize;
-    pub extern fn uws_req_get_headers_byte_length(res: *Request) usize;
 };
 
 const std = @import("std");
