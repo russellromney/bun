@@ -64,6 +64,61 @@ test("http2.createSecureServer with allowHTTP1 handles HTTP/1.1 requests", async
   server.close();
 });
 
+test("http2.createSecureServer with allowHTTP1 honors res.sendDate = false", async () => {
+  const { promise: listening, resolve: onListening } = Promise.withResolvers<number>();
+  const {
+    promise: done,
+    resolve: onDone,
+    reject: onError,
+  } = Promise.withResolvers<{
+    date: string | undefined;
+    contentType: string | undefined;
+    body: string;
+  }>();
+
+  const server = http2.createSecureServer(
+    {
+      allowHTTP1: true,
+      ...tls,
+    },
+    (req, res) => {
+      // renderNativeHeaders() omits Date when sendDate is false, so the
+      // fallback must not re-synthesize it (it used to add Date unconditionally).
+      res.sendDate = false;
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end("ok");
+    },
+  );
+
+  server.listen(0, () => {
+    onListening((server.address() as any).port);
+  });
+
+  const port = await listening;
+
+  const req = https.get(`https://localhost:${port}`, { rejectUnauthorized: false }, res => {
+    let data = "";
+    res.on("data", (chunk: any) => (data += chunk));
+    res.on("end", () => {
+      onDone({
+        date: res.headers["date"],
+        contentType: res.headers["content-type"],
+        body: data,
+      });
+    });
+  });
+  req.on("error", onError);
+
+  const result = await done;
+  expect(result).toEqual({
+    date: undefined,
+    contentType: "text/plain",
+    body: "ok",
+  });
+
+  server.close();
+});
+
 test("http2.createSecureServer with allowHTTP1 still handles HTTP/2 requests", async () => {
   const { promise: listening, resolve: onListening } = Promise.withResolvers<number>();
 

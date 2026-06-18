@@ -5345,8 +5345,6 @@ function createHttp1FallbackResponseHandle(socket, shouldKeepAlive, keepAliveTim
     let out = `HTTP/1.1 ${statusCode} ${statusMessage}\r\n`;
     let hasContentLength = false;
     let hasTransferEncoding = false;
-    let hasDate = false;
-    let hasConnection = false;
     // renderNativeHeaders() (see _http_server.ts) hands the native handle a
     // flat [name, value, name, value, ...] array, not an array of pairs, so
     // the values are read two entries at a time. A NUL-named sentinel pair
@@ -5370,12 +5368,6 @@ function createHttp1FallbackResponseHandle(socket, shouldKeepAlive, keepAliveTim
             hasTransferEncoding = true;
             if (String(value).toLowerCase().includes("chunked")) chunked = true;
             break;
-          case "date":
-            hasDate = true;
-            break;
-          case "connection":
-            hasConnection = true;
-            break;
         }
         out += `${name}: ${value}\r\n`;
       }
@@ -5388,11 +5380,12 @@ function createHttp1FallbackResponseHandle(socket, shouldKeepAlive, keepAliveTim
         out += `Content-Length: ${contentLength}\r\n`;
       }
     }
-    if (!hasDate) {
+    // renderNativeHeaders() is the source of truth for the Date and Connection
+    // response headers (it honors res.sendDate and res.removeHeader("connection")),
+    // so only synthesize them when no rendered header array was provided.
+    if (!headers) {
       out += `Date: ${new Date().toUTCString()}\r\n`;
-    }
-    if (!hasConnection) {
-      if (shouldKeepAlive && !closeDelimited) {
+      if (shouldKeepAlive) {
         out += `Connection: keep-alive\r\nKeep-Alive: timeout=${Math.floor((keepAliveTimeout || 5000) / 1000)}\r\n`;
       } else {
         out += "Connection: close\r\n";
