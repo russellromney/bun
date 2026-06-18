@@ -335,5 +335,12 @@ const errors: ErrorCodeMapping = [
   ["ERR_HTTP2_GOAWAY_SESSION", Error],
   ["ERR_TLS_ALPN_CALLBACK_INVALID_RESULT", TypeError],
   ["ERR_PROXY_TUNNEL", Error],
+  ["ERR_HTTP2_INVALID_CONNECTION_HEADERS", TypeError],
+  ["ERR_QUIC_CONNECTION_FAILED", Error],
+  ["ERR_QUIC_ENDPOINT_CLOSED", Error],
+  ["ERR_QUIC_OPEN_STREAM_FAILED", Error],
+  ["ERR_QUIC_STREAM_ABORTED", Error],
+  ["ERR_QUIC_STREAM_RESET", Error],
+  ["ERR_QUIC_VERSION_NEGOTIATION_ERROR", Error],
 ];
 export default errors;
