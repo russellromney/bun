@@ -119,6 +119,64 @@ test("http2.createSecureServer with allowHTTP1 honors res.sendDate = false", asy
   server.close();
 });
 
+test("http2.createSecureServer with allowHTTP1 sends Keep-Alive on persistent connections", async () => {
+  const { promise: listening, resolve: onListening } = Promise.withResolvers<number>();
+  const {
+    promise: done,
+    resolve: onDone,
+    reject: onError,
+  } = Promise.withResolvers<{
+    connection: string | undefined;
+    keepAlive: string | undefined;
+    body: string;
+  }>();
+
+  const server = http2.createSecureServer(
+    {
+      allowHTTP1: true,
+      ...tls,
+    },
+    (req, res) => {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end("ok");
+    },
+  );
+
+  server.listen(0, () => {
+    onListening((server.address() as any).port);
+  });
+
+  const port = await listening;
+
+  // keepAlive advertises a persistent connection, which is what makes the
+  // server emit Connection: keep-alive together with Keep-Alive: timeout=N.
+  const agent = new https.Agent({ keepAlive: true });
+  const req = https.get(`https://localhost:${port}`, { rejectUnauthorized: false, agent }, res => {
+    let data = "";
+    res.on("data", (chunk: any) => (data += chunk));
+    res.on("end", () => {
+      onDone({
+        connection: res.headers["connection"],
+        // renderNativeHeaders() only emits Keep-Alive when res._keepAliveTimeout
+        // is set, so connectionListenerHTTP1 must set it like the node:http path.
+        keepAlive: res.headers["keep-alive"],
+        body: data,
+      });
+    });
+  });
+  req.on("error", onError);
+
+  const result = await done;
+  expect(result).toEqual({
+    connection: "keep-alive",
+    keepAlive: "timeout=5",
+    body: "ok",
+  });
+
+  agent.destroy();
+  server.close();
+});
+
 test("http2.createSecureServer with allowHTTP1 still handles HTTP/2 requests", async () => {
   const { promise: listening, resolve: onListening } = Promise.withResolvers<number>();
 

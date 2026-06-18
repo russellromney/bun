@@ -5537,6 +5537,9 @@ function connectionListenerHTTP1(server, socket, options) {
     };
 
     const res = new ServerResponseClass(req);
+    // Mirror the native node:http path (_http_server.ts) so renderNativeHeaders()
+    // emits the Keep-Alive: timeout header on persistent connections.
+    res._keepAliveTimeout = keepAliveTimeout;
     const handle = createHttp1FallbackResponseHandle(socket, shouldKeepAlive, keepAliveTimeout);
     handle.onfinished = function () {
       socket[kHttp1ActiveRequests] = Math.max(0, (socket[kHttp1ActiveRequests] || 1) - 1);
