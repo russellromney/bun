@@ -5331,6 +5331,8 @@ function createHttp1FallbackResponseHandle(socket, shouldKeepAlive, keepAliveTim
   let head = null;
   let headWritten = false;
   let chunked = false;
+  let noBody = false;
+  let closeDelimited = false;
 
   function writeHeadToSocket(contentLength) {
     if (headWritten) return;
@@ -5345,10 +5347,22 @@ function createHttp1FallbackResponseHandle(socket, shouldKeepAlive, keepAliveTim
     let hasTransferEncoding = false;
     let hasDate = false;
     let hasConnection = false;
+    // renderNativeHeaders() (see _http_server.ts) hands the native handle a
+    // flat [name, value, name, value, ...] array, not an array of pairs, so
+    // the values are read two entries at a time. A NUL-named sentinel pair
+    // carries a framing decision rather than a real header: value "2" means no
+    // body (HEAD), value "1" means the body is close-delimited.
     const headers = head?.headers;
     if (headers) {
-      for (const { 0: name, 1: value } of headers) {
-        switch (name) {
+      for (let i = 0; i + 1 < headers.length; i += 2) {
+        const name = headers[i];
+        const value = headers[i + 1];
+        if (name === "\u0000") {
+          if (value === "2") noBody = true;
+          else closeDelimited = true;
+          continue;
+        }
+        switch (name.toLowerCase()) {
           case "content-length":
             hasContentLength = true;
             break;
@@ -5366,7 +5380,7 @@ function createHttp1FallbackResponseHandle(socket, shouldKeepAlive, keepAliveTim
         out += `${name}: ${value}\r\n`;
       }
     }
-    if (!hasContentLength && !hasTransferEncoding) {
+    if (!noBody && !closeDelimited && !hasContentLength && !hasTransferEncoding) {
       if (contentLength === null) {
         chunked = true;
         out += "Transfer-Encoding: chunked\r\n";
@@ -5378,7 +5392,7 @@ function createHttp1FallbackResponseHandle(socket, shouldKeepAlive, keepAliveTim
       out += `Date: ${new Date().toUTCString()}\r\n`;
     }
     if (!hasConnection) {
-      if (shouldKeepAlive) {
+      if (shouldKeepAlive && !closeDelimited) {
         out += `Connection: keep-alive\r\nKeep-Alive: timeout=${Math.floor((keepAliveTimeout || 5000) / 1000)}\r\n`;
       } else {
         out += "Connection: close\r\n";
@@ -5428,6 +5442,7 @@ function createHttp1FallbackResponseHandle(socket, shouldKeepAlive, keepAliveTim
     write(chunk, encoding, _callback, _strictContentLength) {
       const buf = toBuffer(chunk, encoding);
       writeHeadToSocket(null);
+      if (noBody) return 0;
       return writeBody(buf);
     },
     end(chunk, encoding, _callback, _strictContentLength) {
@@ -5435,10 +5450,15 @@ function createHttp1FallbackResponseHandle(socket, shouldKeepAlive, keepAliveTim
       const buf = toBuffer(chunk, encoding);
       const length = buf ? (buf.byteLength ?? buf.length) : 0;
       writeHeadToSocket(length);
-      writeBody(buf);
-      if (chunked) socket.write("0\r\n\r\n");
+      if (!noBody) {
+        writeBody(buf);
+        if (chunked) socket.write("0\r\n\r\n");
+      }
       this.ended = true;
       this.finished = true;
+      if (closeDelimited && !socket.destroyed) {
+        socket.end();
+      }
       const onfinished = this.onfinished;
       if (onfinished) {
         this.onfinished = null;
