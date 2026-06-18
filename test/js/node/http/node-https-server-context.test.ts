@@ -140,6 +140,13 @@ describe("https.Server", () => {
 
       server.addContext("a.example.com", { key: agent3Key, cert: agent3Cert });
       expect(await peerCN(port, "a.example.com")).toBe("agent3");
+
+      // A re-add with a malformed cert throws, and must not strip the
+      // previous working SNI entry.
+      expect(() =>
+        server.addContext("a.example.com", { key: agent1Key, cert: "-----BEGIN CERTIFICATE-----\ntruncated" }),
+      ).toThrow();
+      expect(await peerCN(port, "a.example.com")).toBe("agent3");
     } finally {
       server.close();
     }

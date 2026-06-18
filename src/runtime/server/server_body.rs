@@ -2525,6 +2525,36 @@ where
                     .throw_invalid_arguments(format_args!("hostname must not contain NUL bytes")));
             }
         };
+        // Validate that an SSL_CTX can be built from these options before
+        // touching the existing SNI entry. uWS's addServerName builds the
+        // SSL_CTX internally, so without this probe a malformed cert/key
+        // would fail after remove_server_name() had already stripped the
+        // previous entry, leaving the hostname with no SNI context.
+        {
+            let mut create_err = uws::create_bun_socket_error_t::none;
+            match ssl_opts.create_ssl_context(&mut create_err) {
+                Some(probe) => {
+                    // SAFETY: create_ssl_context returned a +1 ref; release it.
+                    unsafe { bun_boringssl_sys::SSL_CTX_free(probe) };
+                }
+                None => {
+                    if create_err != uws::create_bun_socket_error_t::none {
+                        return Err(global.throw_value(
+                            crate::socket::uws_jsc::create_bun_socket_error_to_js(
+                                create_err, global,
+                            ),
+                        ));
+                    }
+                    if !super::throw_ssl_error_if_necessary(global) {
+                        return Err(global.throw(format_args!(
+                            "Failed to create SSL context for serverName: {}",
+                            bstr::BStr::new(server_name.to_bytes())
+                        )));
+                    }
+                    return Err(JsError::Thrown);
+                }
+            }
+        }
         // Node's addContext() permits repeated calls with the same hostname
         // (last one wins). uWS's addServerName rejects a duplicate and its
         // rollback also removes the existing entry from every listen socket,
