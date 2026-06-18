@@ -2075,7 +2075,11 @@ const emptyArray = [];
 // format, rejecting illegal header configurations, and marking sensitive
 // headers that should not be indexed en route. Takes either a flat array of
 // raw headers ([k1, v1, k2, v2]) or a header object ({ k1: v1, k2: [v2, v3] }).
-function buildNgHeaderString(arrayOrMap, validatePseudoHeaderValue = assertValidPseudoHeader, strictSingleValueFields = true) {
+function buildNgHeaderString(
+  arrayOrMap,
+  validatePseudoHeaderValue = assertValidPseudoHeader,
+  strictSingleValueFields = true,
+) {
   let headers = "";
   let pseudoHeaders = "";
   let count = 0;
