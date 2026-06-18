@@ -163,6 +163,7 @@ describe("https.Server", () => {
 
       const socket = tls.connect({ host: "127.0.0.1", port, servername: "a.example.com", rejectUnauthorized: false });
       const errored = once(socket, "error").then(([e]) => Promise.reject(e));
+      const closed = once(socket, "close").then(() => Promise.reject(new Error("socket closed before response")));
       try {
         await Promise.race([once(socket, "secureConnect"), errored]);
         expect(socket.getPeerCertificate().subject?.CN).toBe("agent1");
@@ -170,9 +171,8 @@ describe("https.Server", () => {
         const readResponse = async () => {
           const chunks: Buffer[] = [];
           while (true) {
-            const got = await Promise.race([once(socket, "data"), once(socket, "close"), errored]);
-            if (!got || got.length === 0) throw new Error("socket closed before response");
-            chunks.push(got[0]);
+            const [chunk] = await Promise.race([once(socket, "data"), closed, errored]);
+            chunks.push(chunk);
             const raw = Buffer.concat(chunks).toString("utf8");
             const sep = raw.indexOf("\r\n\r\n");
             if (sep >= 0 && raw.length >= sep + 4 + 2) return raw.slice(sep + 4, sep + 4 + 2);
