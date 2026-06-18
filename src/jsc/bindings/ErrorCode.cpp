@@ -534,13 +534,44 @@ void addParameter(WTF::StringBuilder& result, const StringView& arg_name)
     }
 }
 
-WTF::String ERR_INVALID_ARG_TYPE(JSC::ThrowScope& scope, JSC::JSGlobalObject* globalObject, const StringView& arg_name, const StringView& expected_type, JSValue actual_value)
+// Matches Node's /^(?:[A-Z][a-z0-9]*)+$/ — a single CamelCase word (no spaces
+// or punctuation). Node treats these as class names and formats them as
+// "an instance of X" in ERR_INVALID_ARG_TYPE.
+// https://github.com/nodejs/node/blob/v24.3.0/lib/internal/errors.js
+static bool isSingleClassName(const StringView& name)
 {
-    WTF::StringBuilder result;
-    result.append("The "_s);
-    addParameter(result, arg_name);
-    result.append(" must be "_s);
+    if (name.isEmpty() || !(name[0] >= 'A' && name[0] <= 'Z')) return false;
+    for (unsigned i = 1; i < name.length(); i++) {
+        auto c = name[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))) {
+            return false;
+        }
+    }
+    return true;
+}
 
+// Appends the "of type X" / "an instance of X" wording for a single expected
+// type. Node.js special-cases "Object" and "Function" to be lowercased
+// primitives, and CamelCase identifiers become "an instance of". A free-form
+// phrase like "Array of unique strings" (contains a space but is not a
+// flattened "X, Y, or Z" list) is rendered as "an Array of unique strings".
+// Anything else (pre-formatted lists, lowercase type names) keeps the
+// original "of type X" wording so existing callers are unaffected.
+static void appendExpectedType(WTF::StringBuilder& result, const StringView& expected_type)
+{
+    if (expected_type == "Object"_s) {
+        result.append("of type object"_s);
+        return;
+    }
+    if (expected_type == "Function"_s) {
+        result.append("of type function"_s);
+        return;
+    }
+    if (isSingleClassName(expected_type)) {
+        result.append("an instance of "_s);
+        result.append(expected_type);
+        return;
+    }
     // Node categorizes a free-form phrase like "Array of unique strings"
     // (spaces, but not a flattened "X, Y, or Z" list) as neither a primitive
     // type name nor a class name: it renders "must be an Array of unique
@@ -557,11 +588,20 @@ WTF::String ERR_INVALID_ARG_TYPE(JSC::ThrowScope& scope, JSC::JSGlobalObject* gl
         }
         if (hasUppercase)
             result.append("an "_s);
-    } else {
-        result.append("of type "_s);
+        result.append(expected_type);
+        return;
     }
-
+    result.append("of type "_s);
     result.append(expected_type);
+}
+
+WTF::String ERR_INVALID_ARG_TYPE(JSC::ThrowScope& scope, JSC::JSGlobalObject* globalObject, const StringView& arg_name, const StringView& expected_type, JSValue actual_value)
+{
+    WTF::StringBuilder result;
+    result.append("The "_s);
+    addParameter(result, arg_name);
+    result.append(" must be "_s);
+    appendExpectedType(result, expected_type);
     result.append(". Received "_s);
     determineSpecificType(JSC::getVM(globalObject), globalObject, result, actual_value);
     RETURN_IF_EXCEPTION(scope, {});
@@ -570,6 +610,23 @@ WTF::String ERR_INVALID_ARG_TYPE(JSC::ThrowScope& scope, JSC::JSGlobalObject* gl
 
 WTF::String ERR_INVALID_ARG_TYPE(JSC::ThrowScope& scope, JSC::JSGlobalObject* globalObject, const StringView& arg_name, ArgList expected_types, JSValue actual_value)
 {
+    unsigned length = expected_types.size();
+
+    // Empty arrays are not expected but guard against `length - 1` wrap.
+    if (length == 0) {
+        return ERR_INVALID_ARG_TYPE(scope, globalObject, arg_name, "undefined"_s, actual_value);
+    }
+
+    // A single-element array should format identically to passing that
+    // element directly as a string (Node.js has the same behaviour).
+    if (length == 1) {
+        auto* str = expected_types.at(0).toString(globalObject);
+        RETURN_IF_EXCEPTION(scope, {});
+        auto view = str->view(globalObject);
+        RETURN_IF_EXCEPTION(scope, {});
+        return ERR_INVALID_ARG_TYPE(scope, globalObject, arg_name, view, actual_value);
+    }
+
     WTF::StringBuilder result;
 
     result.append("The "_s);
@@ -577,13 +634,7 @@ WTF::String ERR_INVALID_ARG_TYPE(JSC::ThrowScope& scope, JSC::JSGlobalObject* gl
     result.append(" must be "_s);
     result.append("of type "_s);
 
-    unsigned length = expected_types.size();
-    if (length == 1) {
-        auto* str = expected_types.at(0).toString(globalObject);
-        RETURN_IF_EXCEPTION(scope, {});
-        result.append(str->view(globalObject));
-        RETURN_IF_EXCEPTION(scope, {});
-    } else if (length == 2) {
+    if (length == 2) {
         auto* str1 = expected_types.at(0).toString(globalObject);
         RETURN_IF_EXCEPTION(scope, {});
         result.append(str1->view(globalObject));

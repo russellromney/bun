@@ -1410,6 +1410,8 @@ const nameForErrorCode = [
 ];
 const constants = {
   NGHTTP2_ERR_FRAME_SIZE_ERROR: -522,
+  NGHTTP2_NV_FLAG_NONE: 0,
+  NGHTTP2_NV_FLAG_NO_INDEX: 1,
   NGHTTP2_SESSION_SERVER: 0,
   NGHTTP2_SESSION_CLIENT: 1,
   NGHTTP2_STREAM_STATE_IDLE: 1,
@@ -1956,7 +1958,287 @@ function assertValidPseudoHeader(key) {
 }
 hideFromStack(assertValidPseudoHeader);
 
+function assertValidPseudoHeaderResponse(key) {
+  if (key !== ":status") {
+    throw $ERR_HTTP2_INVALID_PSEUDOHEADER(key);
+  }
+}
+hideFromStack(assertValidPseudoHeaderResponse);
+
+function assertValidPseudoHeaderTrailer(key) {
+  throw $ERR_HTTP2_INVALID_PSEUDOHEADER(key);
+}
+hideFromStack(assertValidPseudoHeaderTrailer);
+
+function assertWithinRange(name, value, min = 0, max = Infinity) {
+  if (value !== undefined && (typeof value !== "number" || value < min || value > max)) {
+    throw $ERR_HTTP2_INVALID_SETTING_VALUE_RangeError(`Invalid value for setting "${name}": ${value}`);
+  }
+}
+hideFromStack(assertWithinRange);
+
+function isIllegalConnectionSpecificHeader(name, value) {
+  switch (name) {
+    case HTTP2_HEADER_CONNECTION:
+    case HTTP2_HEADER_UPGRADE:
+    case HTTP2_HEADER_HTTP2_SETTINGS:
+    case HTTP2_HEADER_KEEP_ALIVE:
+    case HTTP2_HEADER_PROXY_CONNECTION:
+    case HTTP2_HEADER_TRANSFER_ENCODING:
+      return true;
+    case HTTP2_HEADER_TE:
+      return value !== "trailers";
+    default:
+      return false;
+  }
+}
+
+function sessionName(type) {
+  switch (type) {
+    case NGHTTP2_SESSION_CLIENT:
+      return "client";
+    case NGHTTP2_SESSION_SERVER:
+      return "server";
+    default:
+      return "<invalid>";
+  }
+}
+
+// Subset of nghttp2 library error codes. Matches nghttp2_strerror() so
+// NghttpError gives the same messages as Node.
+const kNghttp2ErrorMessages = {
+  "-501": "Invalid argument",
+  "-502": "Out of buffer space",
+  "-503": "Unsupported SETTINGS frame version",
+  "-504": "Server push is disabled by peer",
+  "-505": "The user callback function failed due to the temporal error",
+  "-506": "The length of the frame is invalid",
+  "-507": "Invalid header block",
+  "-509": "The stream is already closed; or the stream ID is invalid",
+  "-510": "The stream is already closed; or the stream ID is invalid",
+  "-511": "Stream ID has reached the maximum value",
+  "-513": "Stream was reset",
+  "-514": "Another DATA frame has already been deferred",
+  "-515": "request HEADERS is not allowed",
+  "-516": "GOAWAY has already been sent",
+  "-519": "The transmission is not allowed for this stream",
+  "-521": "Invalid stream ID",
+  "-522": "The length of the frame is invalid",
+  "-523": "Header block inflate/deflate error",
+  "-524": "Flow control error",
+  "-525": "Insufficient buffer size given to function",
+  "-526": "Callback was paused by the application",
+  "-527": "Too many inflight SETTINGS",
+  "-528": "Server push is disabled by peer",
+  "-529": "DATA or HEADERS frame for a given stream has been already submitted",
+  "-530": "The current session is closing",
+  "-531": "Invalid HTTP header field was received",
+  "-532": "Violation in HTTP messaging rule",
+  "-533": "Stream was refused",
+  "-534": "Unexpected internal error",
+  "-535": "Cancel",
+  "-536": "When a local endpoint expects to receive SETTINGS frame, it receives an other type of frame",
+  "-537": "SETTINGS frame contained more than the maximum allowed entries",
+  "-538": "Too many CONTINUATION frames following a HEADER frame",
+  "-900": "Out of memory",
+  "-901": "The user callback function failed",
+  "-902": "Received bad client magic byte string",
+  "-903": "SETTINGS frame cannot be flooded",
+  "-904": "Protocol error",
+};
+
+function nghttp2ErrorString(code) {
+  return kNghttp2ErrorMessages[`${code}`] ?? "Unknown error code";
+}
+
+class NghttpError extends Error {
+  code: string;
+  errno: number;
+  constructor(integerCode: number, customErrorCode?: string) {
+    super(customErrorCode ? String(customErrorCode) : nghttp2ErrorString(integerCode));
+    this.code = customErrorCode || "ERR_HTTP2_ERROR";
+    this.errno = integerCode;
+  }
+
+  toString() {
+    return `${this.name} [${this.code}]: ${this.message}`;
+  }
+}
+
+const NGHTTP2_NV_FLAG_NONE = 0;
+const NGHTTP2_NV_FLAG_NO_INDEX = 1;
+const kNeverIndexFlag = String.fromCharCode(NGHTTP2_NV_FLAG_NO_INDEX);
+const kNoHeaderFlags = String.fromCharCode(NGHTTP2_NV_FLAG_NONE);
+const emptyArray = [];
+
+// Builds an NgHeader string + header count value, validating the header key
+// format, rejecting illegal header configurations, and marking sensitive
+// headers that should not be indexed en route. Takes either a flat array of
+// raw headers ([k1, v1, k2, v2]) or a header object ({ k1: v1, k2: [v2, v3] }).
+function buildNgHeaderString(arrayOrMap, validatePseudoHeaderValue = assertValidPseudoHeader, strictSingleValueFields = true) {
+  let headers = "";
+  let pseudoHeaders = "";
+  let count = 0;
+
+  const singles = new SafeSet();
+  const sensitive = arrayOrMap[sensitiveHeaders] || emptyArray;
+  const neverIndex = sensitive.map(v => v.toLowerCase());
+
+  function processHeader(key, value) {
+    key = key.toLowerCase();
+    const isStrictSingleValueField = strictSingleValueFields && kSingleValueHeaders.has(key);
+    let isArray = ArrayIsArray(value);
+    if (isArray) {
+      switch (value.length) {
+        case 0:
+          return;
+        case 1:
+          value = String(value[0]);
+          isArray = false;
+          break;
+        default:
+          if (isStrictSingleValueField) {
+            throw $ERR_HTTP2_HEADER_SINGLE_VALUE(`Header field "${key}" must only have a single value`);
+          }
+      }
+    } else {
+      value = String(value);
+    }
+    if (isStrictSingleValueField) {
+      if (singles.has(key)) {
+        throw $ERR_HTTP2_HEADER_SINGLE_VALUE(`Header field "${key}" must only have a single value`);
+      }
+      singles.add(key);
+    }
+    const flags = neverIndex.includes(key) ? kNeverIndexFlag : kNoHeaderFlags;
+    if (key[0] === ":") {
+      const err = validatePseudoHeaderValue(key);
+      if (err !== undefined) throw err;
+      pseudoHeaders += `${key}\0${value}\0${flags}`;
+      count++;
+      return;
+    }
+    if (!checkIsHttpToken(key)) {
+      throw $ERR_INVALID_HTTP_TOKEN("Header name", key);
+    }
+    if (isIllegalConnectionSpecificHeader(key, value)) {
+      throw $ERR_HTTP2_INVALID_CONNECTION_HEADERS(`HTTP/1 Connection specific headers are forbidden: "${key}"`);
+    }
+    if (isArray) {
+      for (let j = 0; j < value.length; ++j) {
+        const val = String(value[j]);
+        headers += `${key}\0${val}\0${flags}`;
+      }
+      count += value.length;
+      return;
+    }
+    headers += `${key}\0${value}\0${flags}`;
+    count++;
+  }
+
+  if (ArrayIsArray(arrayOrMap)) {
+    for (let i = 0; i < arrayOrMap.length; i += 2) {
+      const key = arrayOrMap[i];
+      const value = arrayOrMap[i + 1];
+      if (value === undefined || key === "") continue;
+      processHeader(key, value);
+    }
+  } else {
+    const keys = ObjectKeys(arrayOrMap);
+    for (let i = 0; i < keys.length; ++i) {
+      const key = keys[i];
+      const value = arrayOrMap[key];
+      if (value === undefined || key === "") continue;
+      processHeader(key, value);
+    }
+  }
+
+  return [pseudoHeaders + headers, count];
+}
+
+// Bun does not use a native options buffer; this array mirrors the layout
+// Node.js uses in `internalBinding('http2').optionsBuffer` so that
+// `updateOptionsBuffer` and tests exercising it behave identically.
+const IDX_OPTIONS_MAX_DEFLATE_DYNAMIC_TABLE_SIZE = 0;
+const IDX_OPTIONS_MAX_RESERVED_REMOTE_STREAMS = 1;
+const IDX_OPTIONS_MAX_SEND_HEADER_BLOCK_LENGTH = 2;
+const IDX_OPTIONS_PEER_MAX_CONCURRENT_STREAMS = 3;
+const IDX_OPTIONS_PADDING_STRATEGY = 4;
+const IDX_OPTIONS_MAX_HEADER_LIST_PAIRS = 5;
+const IDX_OPTIONS_MAX_OUTSTANDING_PINGS = 6;
+const IDX_OPTIONS_MAX_OUTSTANDING_SETTINGS = 7;
+const IDX_OPTIONS_MAX_SESSION_MEMORY = 8;
+const IDX_OPTIONS_MAX_SETTINGS = 9;
+const IDX_OPTIONS_STREAM_RESET_RATE = 10;
+const IDX_OPTIONS_STREAM_RESET_BURST = 11;
+const IDX_OPTIONS_STRICT_HTTP_FIELD_WHITESPACE_VALIDATION = 12;
+const IDX_OPTIONS_FLAGS = 13;
+const optionsBuffer = new Uint32Array(IDX_OPTIONS_FLAGS + 1);
+const MathMax = Math.max;
+
+function updateOptionsBuffer(options) {
+  let flags = 0;
+  if (typeof options.maxDeflateDynamicTableSize === "number") {
+    flags |= 1 << IDX_OPTIONS_MAX_DEFLATE_DYNAMIC_TABLE_SIZE;
+    optionsBuffer[IDX_OPTIONS_MAX_DEFLATE_DYNAMIC_TABLE_SIZE] = options.maxDeflateDynamicTableSize;
+  }
+  if (typeof options.maxReservedRemoteStreams === "number") {
+    flags |= 1 << IDX_OPTIONS_MAX_RESERVED_REMOTE_STREAMS;
+    optionsBuffer[IDX_OPTIONS_MAX_RESERVED_REMOTE_STREAMS] = options.maxReservedRemoteStreams;
+  }
+  if (typeof options.maxSendHeaderBlockLength === "number") {
+    flags |= 1 << IDX_OPTIONS_MAX_SEND_HEADER_BLOCK_LENGTH;
+    optionsBuffer[IDX_OPTIONS_MAX_SEND_HEADER_BLOCK_LENGTH] = options.maxSendHeaderBlockLength;
+  }
+  if (typeof options.peerMaxConcurrentStreams === "number") {
+    flags |= 1 << IDX_OPTIONS_PEER_MAX_CONCURRENT_STREAMS;
+    optionsBuffer[IDX_OPTIONS_PEER_MAX_CONCURRENT_STREAMS] = options.peerMaxConcurrentStreams;
+  }
+  if (typeof options.paddingStrategy === "number") {
+    flags |= 1 << IDX_OPTIONS_PADDING_STRATEGY;
+    optionsBuffer[IDX_OPTIONS_PADDING_STRATEGY] = options.paddingStrategy;
+  }
+  if (typeof options.maxHeaderListPairs === "number") {
+    flags |= 1 << IDX_OPTIONS_MAX_HEADER_LIST_PAIRS;
+    optionsBuffer[IDX_OPTIONS_MAX_HEADER_LIST_PAIRS] = options.maxHeaderListPairs;
+  }
+  if (typeof options.maxOutstandingPings === "number") {
+    flags |= 1 << IDX_OPTIONS_MAX_OUTSTANDING_PINGS;
+    optionsBuffer[IDX_OPTIONS_MAX_OUTSTANDING_PINGS] = options.maxOutstandingPings;
+  }
+  if (typeof options.maxOutstandingSettings === "number") {
+    flags |= 1 << IDX_OPTIONS_MAX_OUTSTANDING_SETTINGS;
+    optionsBuffer[IDX_OPTIONS_MAX_OUTSTANDING_SETTINGS] = MathMax(1, options.maxOutstandingSettings);
+  }
+  if (typeof options.maxSessionMemory === "number") {
+    flags |= 1 << IDX_OPTIONS_MAX_SESSION_MEMORY;
+    optionsBuffer[IDX_OPTIONS_MAX_SESSION_MEMORY] = MathMax(1, options.maxSessionMemory);
+  }
+  if (typeof options.maxSettings === "number") {
+    flags |= 1 << IDX_OPTIONS_MAX_SETTINGS;
+    optionsBuffer[IDX_OPTIONS_MAX_SETTINGS] = MathMax(1, options.maxSettings);
+  }
+  if (typeof options.streamResetRate === "number") {
+    flags |= 1 << IDX_OPTIONS_STREAM_RESET_RATE;
+    optionsBuffer[IDX_OPTIONS_STREAM_RESET_RATE] = MathMax(1, options.streamResetRate);
+  }
+  if (typeof options.streamResetBurst === "number") {
+    flags |= 1 << IDX_OPTIONS_STREAM_RESET_BURST;
+    optionsBuffer[IDX_OPTIONS_STREAM_RESET_BURST] = MathMax(1, options.streamResetBurst);
+  }
+  if (typeof options.strictFieldWhitespaceValidation === "boolean") {
+    flags |= 1 << IDX_OPTIONS_STRICT_HTTP_FIELD_WHITESPACE_VALIDATION;
+    optionsBuffer[IDX_OPTIONS_STRICT_HTTP_FIELD_WHITESPACE_VALIDATION] =
+      options.strictFieldWhitespaceValidation === true ? 0 : 1;
+  }
+  optionsBuffer[IDX_OPTIONS_FLAGS] = flags;
+}
+
 const NoPayloadMethods = new Set([HTTP2_METHOD_DELETE, HTTP2_METHOD_GET, HTTP2_METHOD_HEAD]);
+
+function isPayloadMeaningless(method) {
+  return NoPayloadMethods.has(method);
+}
 
 type Settings = {
   headerTableSize: number;
@@ -5894,7 +6176,35 @@ export default {
       ServerHttp2Stream,
       ClientHttp2Stream,
     },
-    util: {},
+    util: {
+      assertIsObject,
+      assertIsArray,
+      assertValidPseudoHeader,
+      assertValidPseudoHeaderResponse,
+      assertValidPseudoHeaderTrailer,
+      assertWithinRange,
+      buildNgHeaderString,
+      getAuthority,
+      isIllegalConnectionSpecificHeader,
+      isPayloadMeaningless,
+      kAuthority: Symbol("authority"),
+      kProtocol: Symbol("protocol"),
+      kProxySocket,
+      kRequest,
+      kSensitiveHeaders: sensitiveHeaders,
+      kSocket: bunHTTP2Socket,
+      MAX_ADDITIONAL_SETTINGS,
+      NghttpError,
+      sessionName,
+      toHeaderObject,
+      updateOptionsBuffer,
+    },
+    // Exposed as internalBinding('http2') by the --expose-internals shim.
+    binding: {
+      constants,
+      nghttp2ErrorString,
+      optionsBuffer,
+    },
   },
 };
 
