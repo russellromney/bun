@@ -220,6 +220,12 @@ export const exposedInternals = {
   "internal/streams/add-abort-signal": require("internal/streams/add-abort-signal"),
   "internal/async_context_frame": require("internal/async_context_frame"),
   "internal/async_hooks": require("internal/async_hooks"),
+  "internal/test/binding": {
+    internalBinding(name: string) {
+      if (name === "quic") return require("internal/quic/binding");
+      throw new Error(`internalBinding('${name}') is not exposed for testing`);
+    },
+  },
 };
 
 export const fs = require("node:fs/promises").$data;

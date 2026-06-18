@@ -51,20 +51,5 @@ export default Object.seal(
     QuicSession: getEnumerableConstant(QuicSession),
     QuicStream: getEnumerableConstant(QuicStream),
     constants: getEnumerableConstant(constants),
-    // Internal access for tests that use `--expose-internals` +
-    // `internalBinding('quic')`. Not part of the public API surface.
-    [Symbol.for("::bunquicinternals::")]: {
-      __proto__: null,
-      value: {
-        binding: require("internal/quic/binding"),
-        quic: require("internal/quic/quic"),
-        state: require("internal/quic/state"),
-        stats: require("internal/quic/stats"),
-        symbols: require("internal/quic/symbols"),
-      },
-      enumerable: false,
-      configurable: false,
-      writable: false,
-    },
   }),
 );
