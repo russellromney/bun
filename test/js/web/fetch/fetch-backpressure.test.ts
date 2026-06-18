@@ -59,13 +59,13 @@ async function withRawH2Server(
 ) {
   const state: RawState = { windowUpdates: [] };
   const server = nodetls.createServer({ ...tls, ALPNProtocols: ["h2"] }, socket => {
-    const pingWaiters: Array<() => void> = [];
+    const pingWaiters: Array<(err?: Error) => void> = [];
     const conn: RawConn = {
       socket,
       headers: (id, block) => socket.write(frame(1, 4, id, block)),
       ping: () => {
         socket.write(frame(6, 0, 0, Buffer.alloc(8)));
-        return new Promise(resolve => pingWaiters.push(resolve));
+        return new Promise<void>((resolve, reject) => pingWaiters.push(e => (e ? reject(e) : resolve())));
       },
     };
     let buf = Buffer.alloc(0);
@@ -92,7 +92,16 @@ async function withRawH2Server(
         if (type === 8) state.windowUpdates.push({ id, increment: payload.readUInt32BE(0) & 0x7fffffff });
       }
     });
-    socket.on("error", () => {});
+    let lastError: Error | undefined;
+    socket.on("error", e => {
+      lastError = e;
+    });
+    // Reject any outstanding ping() so floodData fails fast instead of
+    // hanging to the test timeout with no indication of what happened.
+    socket.on("close", () => {
+      const err = lastError ?? new Error("h2 server socket closed with PING outstanding");
+      pingWaiters.splice(0).forEach(w => w(err));
+    });
   });
   server.listen(0);
   await once(server, "listening");
