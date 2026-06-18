@@ -99,7 +99,6 @@ const errors: ErrorCodeMapping = [
   ["ERR_HTTP2_HEADERS_AFTER_RESPOND", Error],
   ["ERR_HTTP2_HEADERS_SENT", Error],
   ["ERR_HTTP2_INFO_STATUS_NOT_ALLOWED", RangeError],
-  ["ERR_HTTP2_INVALID_CONNECTION_HEADERS", TypeError],
   ["ERR_HTTP2_INVALID_HEADER_VALUE", TypeError],
   ["ERR_HTTP2_INVALID_INFO_STATUS", RangeError],
   ["ERR_HTTP2_INVALID_ORIGIN", TypeError],
@@ -340,5 +339,6 @@ const errors: ErrorCodeMapping = [
   ["ERR_FS_CP_EEXIST", Error],
   ["ERR_FS_CP_SYMLINK_TO_SUBDIRECTORY", Error],
   ["ERR_DIR_CONCURRENT_OPERATION", Error],
+  ["ERR_HTTP2_INVALID_CONNECTION_HEADERS", TypeError],
 ];
 export default errors;

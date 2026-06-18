@@ -711,9 +711,11 @@ impl ErrorCode {
     pub const FS_CP_SYMLINK_TO_SUBDIRECTORY: ErrorCode = ErrorCode(326);
     /// `ERR_DIR_CONCURRENT_OPERATION` (instanceof Error)
     pub const DIR_CONCURRENT_OPERATION: ErrorCode = ErrorCode(327);
+    /// `ERR_HTTP2_INVALID_CONNECTION_HEADERS` (instanceof TypeError)
+    pub const HTTP2_INVALID_CONNECTION_HEADERS: ErrorCode = ErrorCode(328);
 
     /// == C++ `NODE_ERROR_COUNT`.
-    pub const COUNT: u16 = 328;
+    pub const COUNT: u16 = 329;
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -1429,6 +1431,7 @@ static CODE_STR: [&str; ErrorCode::COUNT as usize] = [
     "ERR_FS_CP_EEXIST",
     "ERR_FS_CP_SYMLINK_TO_SUBDIRECTORY",
     "ERR_DIR_CONCURRENT_OPERATION",
+    "ERR_HTTP2_INVALID_CONNECTION_HEADERS",
 ];
 
 // ──────────────────────────────────────────────────────────────────────────
