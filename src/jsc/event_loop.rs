@@ -997,6 +997,33 @@ impl EventLoop {
         self.vm_ref().as_mut().auto_tick_active();
     }
 
+    /// Hold a uSockets-loop ref for the lifetime of the returned guard.
+    ///
+    /// Condition-gated drivers (`wait_for_promise`, `wait_for`, the
+    /// `bun:test` drive loop) tick `auto_tick` until a JS-visible condition
+    /// is satisfied, independently of whether JS has anything refing the
+    /// loop. Without this ref `auto_tick` would take its `!is_active()`
+    /// branch — a non-blocking pump that busy-spins the driver on POSIX and
+    /// on Windows never runs due timers (`uv_run` skips them when the loop
+    /// has no ref'd handles). With the ref, `auto_tick`'s existing active
+    /// branch parks on the next timer-heap deadline on both platforms.
+    ///
+    /// Liveness-gated drivers (the main run loop via `auto_tick_active`,
+    /// `wait_for_tasks`) must NOT use this — their exit condition is
+    /// precisely that nothing refs the loop.
+    pub fn ref_loop_scoped(&self) -> impl Drop + use<> {
+        let loop_ = self.usockets_loop();
+        // SAFETY: `usockets_loop()` returns the live per-thread uws loop;
+        // `ref_()` bumps `num_polls` + `active` (POSIX) / `active_handles`
+        // (Windows).
+        unsafe { (*loop_).ref_() };
+        scopeguard::guard(loop_, |l| {
+            // SAFETY: `l` is the same live per-thread loop; balances the ref
+            // above.
+            unsafe { (*l).unref() };
+        })
+    }
+
     /// `eventLoop().waitForPromise(promise)` — spin tick/auto_tick until
     /// `promise` settles or execution is forbidden.
     pub fn wait_for_promise(&mut self, promise: jsc::AnyPromise) {
@@ -1004,6 +1031,7 @@ impl EventLoop {
         if promise.status() != PromiseStatus::Pending {
             return;
         }
+        let _loop_ref = self.ref_loop_scoped();
         while promise.status() == PromiseStatus::Pending {
             if jsc_vm.execution_forbidden() {
                 break;
@@ -1181,6 +1209,7 @@ impl EventLoop {
             .expect("worker is not initialized");
         match promise.status() {
             PromiseStatus::Pending => {
+                let _loop_ref = self.ref_loop_scoped();
                 while !worker.has_requested_terminate()
                     && promise.status() == PromiseStatus::Pending
                 {

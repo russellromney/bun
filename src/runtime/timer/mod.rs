@@ -781,7 +781,7 @@ impl All {
         // thread); `all` is live for the VM lifetime. `drain_timers` may
         // re-enter `(*runtime_state()).timer` — it forms only short-lived
         // `&mut All` around heap pop/peek, so the raw-ptr deref here is sound.
-        unsafe { (*all).drain_timers(vm) };
+        unsafe { All::drain_timers(all, vm) };
         // SAFETY: see above; re-arm for the next-soonest deadline (if any).
         unsafe { (*all).ensure_uv_timer() };
     }
@@ -871,13 +871,13 @@ impl All {
     /// passed in pre-computed until the cycle is broken.
     ///
     /// # Safety
-    /// `vm` is the erased `*mut VirtualMachine` for the calling JS thread and
-    /// must remain live across any `EventLoopTimer::fire` re-entry.
-    // Forwards `vm` to `__bun_fire_timer` without dereferencing it;
-    // not_unsafe_ptr_arg_deref is a false positive on opaque-token forwarding.
-    #[allow(clippy::not_unsafe_ptr_arg_deref)]
-    pub fn get_timeout(
-        &mut self,
+    /// `this` must point to the calling JS thread's live `All` with no
+    /// outstanding `&mut All` — the WTFTimer arm fires callbacks that may
+    /// re-enter `(*runtime_state()).timer`. `vm` is the erased
+    /// `*mut VirtualMachine` for the calling JS thread and must remain live
+    /// across any `EventLoopTimer::fire` re-entry.
+    pub unsafe fn get_timeout(
+        this: *mut Self,
         spec: &mut Timespec,
         has_pending_immediate: bool,
         quic_next_tick_us: Option<i64>,
@@ -891,24 +891,14 @@ impl All {
         #[cfg(not(unix))]
         let _ = has_pending_immediate;
 
-        // Note (§Forbidden aliased-&mut): the WTFTimer arm below calls
-        // `(*min).fire(...)` → `WTFTimer__fire` → C++ may call back into
-        // `WTFTimer__update` → `(*runtime_state()).timer.update(...)`, minting
-        // a fresh `&mut All` to this same allocation while the outer
-        // `&mut self` is live → aliased-`&mut` UB. Mirror `drain_timers`:
-        // convert `self` to a raw pointer up-front and form *short-lived*
-        // `&mut *this` borrows only around `peek()`/`delete_min()`, dropping
-        // them before `fire()` so no `&mut All` is held across the re-entrant
-        // call.
-        //
-        // TODO: same caveat as `drain_timers` — the call-site auto-ref
-        // still creates a `&mut All` for the call frame; switch the signature
-        // to `this: *mut Self` (see the `get_timeout` call sites in jsc_hooks.rs).
-        let this: *mut Self = self;
+        // Note (§Forbidden aliased-&mut): the WTFTimer arm fires C++ that may
+        // re-enter `(*runtime_state()).timer.update(...)`. Per `# Safety` the
+        // receiver is a raw `*mut Self`; form *short-lived* `&mut *this`
+        // borrows only around `peek()`/`delete_min()`, never across `fire()`.
         let mut maybe_now: Option<Timespec> = None;
         loop {
-            // SAFETY: `this` derived from `&mut self`; short-lived exclusive
-            // borrow scoped to this `peek()` call only.
+            // SAFETY: `this` is the live per-thread `All` (fn contract);
+            // short-lived exclusive borrow scoped to this `peek()` call only.
             let Some(min) = (unsafe { &mut *this }).timers.peek() else {
                 break;
             };
@@ -1010,33 +1000,23 @@ impl All {
     }
 
     /// # Safety
-    /// `vm` is the erased `*mut VirtualMachine` for the calling JS thread and
-    /// must remain live across any `EventLoopTimer::fire` re-entry.
-    // Forwards `vm` to `__bun_fire_timer` without dereferencing it;
-    // not_unsafe_ptr_arg_deref is a false positive on opaque-token forwarding.
-    #[allow(clippy::not_unsafe_ptr_arg_deref)]
-    pub fn drain_timers(&mut self, vm: *mut () /* erased *mut VirtualMachine */) {
-        // Note (§Forbidden aliased-&mut): fired handlers re-enter `vm.timer`
-        // (e.g. setInterval reschedule → `vm.timer.update(...)`, `cancel()` →
-        // `vm.timer.remove(...)`). In Rust those re-entrant calls resolve to
-        // `(*runtime_state()).timer.{update,remove}()`, minting a fresh
-        // `&mut All` to this same allocation while the outer `&mut self` is
-        // live → UB under Stacked Borrows. Convert `self` to a raw pointer
-        // up-front and form a *short-lived* `&mut` only around `next()`,
-        // dropping it before `fire()` so no `&mut All` is held across the
-        // re-entrant call (mirroring the raw-ptr pattern in
-        // `TimerObjectInternals::run_immediate_task`).
-        //
-        // TODO: the call-site auto-ref at jsc_hooks.rs (`(*state).timer
-        // .drain_timers(...)`) still creates a `&mut All` for the call frame
-        // itself; switch it to `All::drain_timers(core::ptr::addr_of_mut!(
-        // (*state).timer), vm)` and change this signature to `this: *mut Self`.
-        let this: *mut Self = self;
+    /// `this` must point to the calling JS thread's live `All` with no
+    /// outstanding `&mut All` — fired handlers may re-enter
+    /// `(*runtime_state()).timer`. `vm` is the erased `*mut VirtualMachine`
+    /// for the calling JS thread and must remain live across any
+    /// `EventLoopTimer::fire` re-entry.
+    pub unsafe fn drain_timers(this: *mut Self, vm: *mut () /* erased *mut VirtualMachine */) {
+        // Note (§Forbidden aliased-&mut): fired handlers re-enter
+        // `(*runtime_state()).timer.{update,remove}()` (setInterval
+        // reschedule, `cancel()`). Per `# Safety` the receiver is a raw
+        // `*mut Self`; form a *short-lived* `&mut` only around `next()`,
+        // never across `fire()`.
         let mut now = Timespec { sec: 0, nsec: 0 };
         let mut has_set_now = false;
         loop {
-            // SAFETY: `this` derived from `&mut self`; short-lived exclusive
-            // borrow scoped to this `next()` call only — dropped before fire().
+            // SAFETY: `this` is the live per-thread `All` (fn contract);
+            // short-lived exclusive borrow scoped to this `next()` call only —
+            // dropped before fire().
             let Some(t) = (unsafe { &mut *this }).next(&mut has_set_now, &mut now) else {
                 break;
             };
