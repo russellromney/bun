@@ -141,6 +141,8 @@ pub enum HardcodedModule {
     NodeInspectorPromises,
     #[strum(serialize = "node:http2")]
     NodeHttp2,
+    #[strum(serialize = "node:quic")]
+    NodeQuic,
     #[strum(serialize = "node:diagnostics_channel")]
     NodeDiagnosticsChannel,
     #[strum(serialize = "node:dgram")]
@@ -213,6 +215,7 @@ bun_core::comptime_string_map! {
         b"node:fs/promises" => HardcodedModule::NodeFsPromises,
         b"node:http" => HardcodedModule::NodeHttp,
         b"node:http2" => HardcodedModule::NodeHttp2,
+        b"node:quic" => HardcodedModule::NodeQuic,
         b"node:https" => HardcodedModule::NodeHttps,
         b"node:inspector" => HardcodedModule::NodeInspector,
         b"node:inspector/promises" => HardcodedModule::NodeInspectorPromises,
@@ -438,6 +441,7 @@ const COMMON_ALIAS_KVS: &[AliasKv] = &[
     node_entry!("node:zlib"),
     // New Node.js builtins only resolve from the prefixed one.
     node_entry_only_prefix!("node:test"),
+    node_entry_only_prefix!("node:quic"),
     //
     node_entry!("assert"),
     node_entry!("assert/strict"),
