@@ -82,6 +82,18 @@ const QUIC_CALLBACK_NAMES: &[&str] = &[
 
 #[bun_jsc::host_fn]
 fn set_callbacks(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
+    // Only the first call takes effect; subsequent calls are ignored
+    // (node/src/quic/bindingdata.cc `BindingData::SetCallbacks`).
+    if global
+        .bun_vm()
+        .as_mut()
+        .rare_data()
+        .node_quic_callbacks
+        .get()
+        .is_some()
+    {
+        return Ok(JSValue::UNDEFINED);
+    }
     let callbacks_obj = frame.arguments_as_array::<1>()[0];
     if !callbacks_obj.is_object() {
         return Err(global
