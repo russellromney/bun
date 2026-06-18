@@ -703,9 +703,23 @@ impl ErrorCode {
     pub const TLS_ALPN_CALLBACK_INVALID_RESULT: ErrorCode = ErrorCode(322);
     /// `ERR_PROXY_TUNNEL` (instanceof Error)
     pub const PROXY_TUNNEL: ErrorCode = ErrorCode(323);
+    /// `ERR_HTTP2_INVALID_CONNECTION_HEADERS` (instanceof TypeError)
+    pub const HTTP2_INVALID_CONNECTION_HEADERS: ErrorCode = ErrorCode(324);
+    /// `ERR_QUIC_CONNECTION_FAILED` (instanceof Error)
+    pub const QUIC_CONNECTION_FAILED: ErrorCode = ErrorCode(325);
+    /// `ERR_QUIC_ENDPOINT_CLOSED` (instanceof Error)
+    pub const QUIC_ENDPOINT_CLOSED: ErrorCode = ErrorCode(326);
+    /// `ERR_QUIC_OPEN_STREAM_FAILED` (instanceof Error)
+    pub const QUIC_OPEN_STREAM_FAILED: ErrorCode = ErrorCode(327);
+    /// `ERR_QUIC_STREAM_ABORTED` (instanceof Error)
+    pub const QUIC_STREAM_ABORTED: ErrorCode = ErrorCode(328);
+    /// `ERR_QUIC_STREAM_RESET` (instanceof Error)
+    pub const QUIC_STREAM_RESET: ErrorCode = ErrorCode(329);
+    /// `ERR_QUIC_VERSION_NEGOTIATION_ERROR` (instanceof Error)
+    pub const QUIC_VERSION_NEGOTIATION_ERROR: ErrorCode = ErrorCode(330);
 
     /// == C++ `NODE_ERROR_COUNT`.
-    pub const COUNT: u16 = 324;
+    pub const COUNT: u16 = 331;
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -1071,6 +1085,15 @@ impl ErrorCode {
     pub const ERR_SECRETS_INTERACTION_REQUIRED: ErrorCode = ErrorCode::SECRETS_INTERACTION_REQUIRED;
     pub const ERR_HTTP2_GOAWAY_SESSION: ErrorCode = ErrorCode::HTTP2_GOAWAY_SESSION;
     pub const ERR_PROXY_TUNNEL: ErrorCode = ErrorCode::PROXY_TUNNEL;
+    pub const ERR_HTTP2_INVALID_CONNECTION_HEADERS: ErrorCode =
+        ErrorCode::HTTP2_INVALID_CONNECTION_HEADERS;
+    pub const ERR_QUIC_CONNECTION_FAILED: ErrorCode = ErrorCode::QUIC_CONNECTION_FAILED;
+    pub const ERR_QUIC_ENDPOINT_CLOSED: ErrorCode = ErrorCode::QUIC_ENDPOINT_CLOSED;
+    pub const ERR_QUIC_OPEN_STREAM_FAILED: ErrorCode = ErrorCode::QUIC_OPEN_STREAM_FAILED;
+    pub const ERR_QUIC_STREAM_ABORTED: ErrorCode = ErrorCode::QUIC_STREAM_ABORTED;
+    pub const ERR_QUIC_STREAM_RESET: ErrorCode = ErrorCode::QUIC_STREAM_RESET;
+    pub const ERR_QUIC_VERSION_NEGOTIATION_ERROR: ErrorCode =
+        ErrorCode::QUIC_VERSION_NEGOTIATION_ERROR;
 
     // NOTE: `ERR_SYSTEM_ERROR` / `ERR_CHILD_CLOSED_BEFORE_REPLY` intentionally
     // do NOT live here. They belong to the unrelated enum
@@ -1412,6 +1435,13 @@ static CODE_STR: [&str; ErrorCode::COUNT as usize] = [
     "ERR_HTTP2_GOAWAY_SESSION",
     "ERR_TLS_ALPN_CALLBACK_INVALID_RESULT",
     "ERR_PROXY_TUNNEL",
+    "ERR_HTTP2_INVALID_CONNECTION_HEADERS",
+    "ERR_QUIC_CONNECTION_FAILED",
+    "ERR_QUIC_ENDPOINT_CLOSED",
+    "ERR_QUIC_OPEN_STREAM_FAILED",
+    "ERR_QUIC_STREAM_ABORTED",
+    "ERR_QUIC_STREAM_RESET",
+    "ERR_QUIC_VERSION_NEGOTIATION_ERROR",
 ];
 
 // ──────────────────────────────────────────────────────────────────────────

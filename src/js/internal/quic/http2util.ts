@@ -95,6 +95,15 @@ const emptyArray = [];
 const kNeverIndexFlag = String.fromCharCode(1);
 const kNoHeaderFlags = String.fromCharCode(0);
 
+// The serialized header list is NUL-delimited (`name\0value\0flags`), so an
+// embedded NUL in a header value would desync the triplets parsed by the
+// native side. nghttp3 forbids NUL in field values regardless (RFC 9114 §4.2).
+function assertNoNulInValue(key, value) {
+  if (value.indexOf("\0") !== -1) {
+    throw $ERR_INVALID_CHAR("header content", key);
+  }
+}
+
 /**
  * Builds an NgHeader string + header count value, validating the header key
  * format, rejecting illegal header configurations, and marking sensitive headers
@@ -134,6 +143,7 @@ function buildNgHeaderString(arrayOrMap, validatePseudoHeaderValue, strictSingle
     } else {
       value = String(value);
     }
+    if (!isArray) assertNoNulInValue(key, value);
     if (isStrictSingleValueField) {
       if (singles.has(key)) throw $ERR_HTTP2_HEADER_SINGLE_VALUE(`Header field "${key}" must only have a single value`);
       singles.add(key);
@@ -142,6 +152,7 @@ function buildNgHeaderString(arrayOrMap, validatePseudoHeaderValue, strictSingle
     if (key[0] === ":") {
       const err = validatePseudoHeaderValue(key);
       if (err !== undefined) throw err;
+      if (isArray) assertNoNulInValue(key, `${value}`);
       pseudoHeaders += `${key}\0${value}\0${flags}`;
       count++;
       return;
@@ -155,6 +166,7 @@ function buildNgHeaderString(arrayOrMap, validatePseudoHeaderValue, strictSingle
     if (isArray) {
       for (let j = 0; j < value.length; ++j) {
         const val = String(value[j]);
+        assertNoNulInValue(key, val);
         headers += `${key}\0${val}\0${flags}`;
       }
       count += value.length;
