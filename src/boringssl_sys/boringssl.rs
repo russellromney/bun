@@ -811,3 +811,58 @@ unsafe extern "C" {
         u: *mut c_void,
     ) -> *mut RSA;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Extern functions — TLS context/session setup for QUIC (node:quic)
+// ═══════════════════════════════════════════════════════════════════════════
+
+opaque!(
+    /// `struct evp_pkey_st` (`typedef ... EVP_PKEY`).
+    EVP_PKEY
+);
+opaque!(
+    /// `struct ssl_cipher_st` (`typedef ... SSL_CIPHER`).
+    SSL_CIPHER
+);
+
+/// `TLS1_3_VERSION` (`openssl/tls1.h`).
+pub const TLS1_3_VERSION: u16 = 0x0304;
+/// `X509_V_OK` (`openssl/x509.h`).
+pub const X509_V_OK: c_long = 0;
+
+unsafe extern "C" {
+    pub safe fn TLS_method() -> *const SSL_METHOD;
+
+    pub fn SSL_CTX_set_min_proto_version(ctx: *mut SSL_CTX, version: u16) -> c_int;
+    pub fn SSL_CTX_set_max_proto_version(ctx: *mut SSL_CTX, version: u16) -> c_int;
+    pub fn SSL_CTX_set_verify(ctx: *mut SSL_CTX, mode: c_int, callback: SSL_verify_cb);
+    pub fn SSL_CTX_use_certificate(ctx: *mut SSL_CTX, x509: *mut X509) -> c_int;
+    pub fn SSL_CTX_add_extra_chain_cert(ctx: *mut SSL_CTX, x509: *mut X509) -> c_int;
+    pub fn SSL_CTX_use_PrivateKey(ctx: *mut SSL_CTX, pkey: *mut EVP_PKEY) -> c_int;
+    pub fn SSL_CTX_check_private_key(ctx: *const SSL_CTX) -> c_int;
+
+    pub fn SSL_set1_host(ssl: *mut SSL, hostname: *const c_char) -> c_int;
+    pub fn SSL_get_verify_result(ssl: *const SSL) -> c_long;
+    pub fn SSL_get_current_cipher(ssl: *const SSL) -> *const SSL_CIPHER;
+    pub fn SSL_CIPHER_standard_name(cipher: *const SSL_CIPHER) -> *const c_char;
+    pub fn SSL_CIPHER_get_name(cipher: *const SSL_CIPHER) -> *const c_char;
+    pub fn SSL_get_version(ssl: *const SSL) -> *const c_char;
+
+    pub fn PEM_read_bio_X509(
+        bp: *mut BIO,
+        x: *mut *mut X509,
+        cb: Option<pem_password_cb>,
+        u: *mut c_void,
+    ) -> *mut X509;
+    pub fn PEM_read_bio_PrivateKey(
+        bp: *mut BIO,
+        x: *mut *mut EVP_PKEY,
+        cb: Option<pem_password_cb>,
+        u: *mut c_void,
+    ) -> *mut EVP_PKEY;
+    pub fn EVP_PKEY_free(pkey: *mut EVP_PKEY);
+
+    pub fn X509_verify_cert_error_string(err: c_long) -> *const c_char;
+
+    pub fn RAND_bytes(buf: *mut u8, len: usize) -> c_int;
+}

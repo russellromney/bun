@@ -206,10 +206,13 @@ function isBlob(value) {
   return value instanceof Blob;
 }
 
-// KeyObject adapters: keys are passed to the native binding as KeyObject
-// instances; only the type check happens in JS.
+// KeyObject adapters. The native binding consumes private keys as PKCS#8 PEM
+// text rather than KeyObject handles (Node passes the native KeyObjectHandle;
+// Bun's KeyObject internals are not reachable from the quic binding yet).
+// TODO(quic): pass the KeyObject itself once the binding can read its EVP_PKEY
+// directly; PEM export does not work for non-exportable keys.
 function getKeyObjectHandle(key) {
-  return key;
+  return key.export({ format: "pem", type: "pkcs8" });
 }
 function getKeyObjectType(key) {
   return key.type;
