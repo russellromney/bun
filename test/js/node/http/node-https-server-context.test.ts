@@ -145,6 +145,52 @@ describe("https.Server", () => {
     }
   });
 
+  test("addContext re-add does not break keep-alive connections on the previous SNI context", async () => {
+    const server = https.createServer({ key: agent2Key, cert: agent2Cert }, (req, res) => {
+      res.writeHead(200, { "Content-Length": "2" });
+      res.end("ok");
+    });
+    try {
+      const port = await listen(server);
+      server.addContext("a.example.com", { key: agent1Key, cert: agent1Cert });
+
+      const socket = tls.connect({ host: "127.0.0.1", port, servername: "a.example.com", rejectUnauthorized: false });
+      const errored = once(socket, "error").then(([e]) => Promise.reject(e));
+      try {
+        await Promise.race([once(socket, "secureConnect"), errored]);
+        expect(socket.getPeerCertificate().subject?.CN).toBe("agent1");
+
+        const readResponse = async () => {
+          const chunks: Buffer[] = [];
+          while (true) {
+            const got = await Promise.race([once(socket, "data"), once(socket, "close"), errored]);
+            if (!got || got.length === 0) throw new Error("socket closed before response");
+            chunks.push(got[0]);
+            const raw = Buffer.concat(chunks).toString("utf8");
+            const sep = raw.indexOf("\r\n\r\n");
+            if (sep >= 0 && raw.length >= sep + 4 + 2) return raw.slice(sep + 4, sep + 4 + 2);
+          }
+        };
+
+        socket.write("GET / HTTP/1.1\r\nHost: a.example.com\r\n\r\n");
+        expect(await readResponse()).toBe("ok");
+
+        // Replace the SNI context while the keep-alive connection is open;
+        // the per-domain router for the previous SSL_CTX is freed here.
+        server.addContext("a.example.com", { key: agent3Key, cert: agent3Cert });
+
+        // A second request on the same connection must fall back to the
+        // default router rather than dereferencing the freed per-domain one.
+        socket.write("GET / HTTP/1.1\r\nHost: a.example.com\r\n\r\n");
+        expect(await readResponse()).toBe("ok");
+      } finally {
+        socket.destroy();
+      }
+    } finally {
+      server.close();
+    }
+  });
+
   test("setSecureContext replaces the default context before listen", async () => {
     const server = https.createServer({ key: agent2Key, cert: agent2Cert }, (req, res) => {
       res.writeHead(200);

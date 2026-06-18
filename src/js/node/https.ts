@@ -518,6 +518,12 @@ Server.prototype.addContext = function (hostname, context) {
   const entry = tlsOptionsFromContext(context);
   entry.serverName = hostname;
   const contexts = (this[kSNIContexts] ??= []);
+  const bunServer = this[serverSymbol];
+  if (bunServer) {
+    // Register on the running app first so a failed add (malformed PEM,
+    // key/cert mismatch) throws before we drop the previous JS-side entry.
+    httpServerAddServerName(bunServer, hostname, entry);
+  }
   // Node's addContext() lets the most recently added context for a given
   // hostname win. uWS rejects a duplicate serverName at register time, so
   // drop any earlier entry for the same hostname rather than passing both
@@ -528,10 +534,6 @@ Server.prototype.addContext = function (hostname, context) {
     }
   }
   ArrayPrototypePush.$call(contexts, entry);
-  const bunServer = this[serverSymbol];
-  if (bunServer) {
-    httpServerAddServerName(bunServer, hostname, entry);
-  }
 };
 
 Server.prototype.setSecureContext = function (options) {
