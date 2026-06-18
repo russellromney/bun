@@ -137,7 +137,11 @@ test("http2.createSecureServer without allowHTTP1 rejects HTTP/1.1", async () =>
 
   const port = await listening;
 
-  const { promise: done, resolve: onDone } = Promise.withResolvers<{ status?: number; body?: string; error?: string }>();
+  const { promise: done, resolve: onDone } = Promise.withResolvers<{
+    status?: number;
+    body?: string;
+    error?: string;
+  }>();
 
   const req = https.get(`https://localhost:${port}`, { rejectUnauthorized: false }, res => {
     let data = "";
