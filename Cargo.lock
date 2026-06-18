@@ -1338,6 +1338,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bun_nghttp3_sys"
+version = "0.0.0"
+
+[[package]]
+name = "bun_ngtcp2_sys"
+version = "0.0.0"
+
+[[package]]
 name = "bun_opaque"
 version = "0.0.0"
 

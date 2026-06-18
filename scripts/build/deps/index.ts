@@ -27,8 +27,11 @@ import { lshpack } from "./lshpack.ts";
 import { lsqpack } from "./lsqpack.ts";
 import { lsquic } from "./lsquic.ts";
 import { mimalloc } from "./mimalloc.ts";
+import { nghttp3 } from "./nghttp3.ts";
+import { ngtcp2 } from "./ngtcp2.ts";
 import { nodejsHeaders } from "./nodejs-headers.ts";
 import { picohttpparser } from "./picohttpparser.ts";
+import { sfparse } from "./sfparse.ts";
 import { sqlite } from "./sqlite.ts";
 import { tinycc } from "./tinycc.ts";
 import { webkit } from "./webkit.ts";
@@ -71,6 +74,13 @@ export const allDeps: readonly Dependency[] = [
   // a DirectBuild dep its .o files go straight on the link line so static
   // link order doesn't apply.
   lsquic,
+  // nghttp3 before ngtcp2 only for readability; both are DirectBuild so link
+  // order doesn't apply. sfparse before nghttp3 (fetchDeps: nghttp3 compiles
+  // sfparse.c). ngtcp2 after boringssl: needs ssl.h at compile time
+  // (fetchDeps) for its BoringSSL crypto backend.
+  sfparse,
+  nghttp3,
+  ngtcp2,
   // WebKit LAST in link order — WTF/JSC provide symbols that everything
   // above might reference (via JavaScriptCore types in headers).
   webkit,
@@ -94,8 +104,11 @@ export {
   lsqpack,
   lsquic,
   mimalloc,
+  nghttp3,
+  ngtcp2,
   nodejsHeaders,
   picohttpparser,
+  sfparse,
   sqlite,
   tinycc,
   webkit,

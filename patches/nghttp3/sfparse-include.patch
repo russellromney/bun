@@ -1,0 +1,17 @@
+Upstream nghttp3 vendors sfparse as a git submodule at lib/sfparse, which the
+GitHub archive tarball leaves empty. We fetch sfparse as its own dependency
+(scripts/build/deps/sfparse.ts, pinned to the submodule commit) and put its
+source root on the include path, so the include drops the submodule directory
+prefix.
+
+--- a/lib/nghttp3_http.c
++++ b/lib/nghttp3_http.c
+@@ -36,7 +36,7 @@
+ #include "nghttp3_macro.h"
+ #include "nghttp3_conv.h"
+ #include "nghttp3_unreachable.h"
+-#include "sfparse/sfparse.h"
++#include "sfparse.h"
+ 
+ static uint8_t downcase(uint8_t c) {
+   return 'A' <= c && c <= 'Z' ? (uint8_t)(c - 'A' + 'a') : c;
