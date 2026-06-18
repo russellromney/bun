@@ -758,6 +758,12 @@ unsafe fn load_preloads(
                 let el = unsafe { &*vm }.event_loop();
                 // SAFETY: `el` is the live per-thread event loop.
                 unsafe { (*el).perform_gc() };
+                // See `EventLoop::ref_loop_scoped` — this drive loop keeps
+                // ticking until the preload's module promise settles, so
+                // ref the loop so `auto_tick` parks on timer deadlines
+                // instead of spinning (mirrors the entry-point loaders).
+                // SAFETY: `el` is the live per-thread event loop.
+                let _loop_ref = unsafe { &*el }.ref_loop_scoped();
                 loop {
                     // SAFETY: `pending_internal_promise` was set just above (or
                     // swapped by HMR to another live cell); `status()` is a
