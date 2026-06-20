@@ -6019,8 +6019,7 @@ pub mod __gated_printer {
                         // module loader (via the `with { type: "webassembly" }`
                         // lowering below) so it can error, not silently
                         // bind `globalThis.Bun`.
-                        if record.tag == ImportRecordTag::Bun
-                            && record.phase != ImportPhase::Source
+                        if record.tag == ImportRecordTag::Bun && record.phase != ImportPhase::Source
                         {
                             self.print_global_bun_import_statement(s);
                             self.prev_stmt_tag = new_tag;
