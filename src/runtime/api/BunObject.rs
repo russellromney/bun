@@ -2043,13 +2043,11 @@ pub(crate) fn get_embedded_files(global_this: &JSGlobalObject, _: &JSObject) -> 
         // We call .dupe() on this to ensure that we don't return a blob that might get freed later.
         let blob = Blob::new(input_blob.dupe_with_content_type(true));
         // SAFETY: `Blob::new` returned a fresh heap allocation.
-        unsafe {
-            (*blob).name.set(input_blob.name.get().dupe_ref());
-            (*blob).is_jsdom_file.set(true);
-            (*blob).calculate_estimated_byte_size();
-        };
+        let blob_ref = unsafe { &*blob };
+        blob_ref.name.set(input_blob.name.get().dupe_ref());
+        blob_ref.is_jsdom_file.set(true);
         // Embedded files expose `.name`, which lives on File.prototype.
-        let blob_js = crate::webcore::blob::dom_file_to_js_unchecked(global_this, blob);
+        let blob_js = blob_ref.to_js(global_this);
         array.put_index(global_this, i as u32, blob_js)?;
     }
 
@@ -3056,10 +3054,12 @@ mod stdio_stores {
         });
         let blob = Blob::new(Blob::init_with_store(store, global_this));
         // SAFETY: `Blob::new` heap-allocates; the JS wrapper takes ownership.
-        unsafe { (*blob).calculate_estimated_byte_size() };
-        // Bun.stdin/stdout/stderr are typed as BunFile; route through the
-        // File structure so `.name` / `.lastModified` stay reachable.
-        crate::webcore::blob::dom_file_to_js_unchecked(global_this, blob)
+        let blob_ref = unsafe { &*blob };
+        // Bun.stdin/stdout/stderr are typed as BunFile; set `is_jsdom_file`
+        // so `to_js()` routes through the File structure and
+        // `.name` / `.lastModified` stay reachable.
+        blob_ref.is_jsdom_file.set(true);
+        blob_ref.to_js(global_this)
     }
 
     pub(super) fn stdin(global_this: &JSGlobalObject) -> JSValue {

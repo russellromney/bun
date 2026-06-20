@@ -1246,10 +1246,10 @@ impl TaskContext for FilesContext {
                     blob.last_modified.set((entry.mtime * 1000) as f64);
 
                     let name_js = blob.name.get().to_js(global)?;
-                    blob.calculate_estimated_byte_size();
-                    // `name` / `lastModified` live on File.prototype, so wrap
-                    // with the File structure (is_jsdom_file is set above).
-                    let blob_js = crate::webcore::blob::dom_file_to_js_unchecked(global, blob_ptr);
+                    // `name` / `lastModified` live on File.prototype; `to_js`
+                    // keys on `is_jsdom_file` (set above) to pick the File
+                    // structure.
+                    let blob_js = blob.to_js(global);
                     // SAFETY: map_ptr came from JSMap::from_js on a live value.
                     unsafe { map_ptr.as_mut() }.set(global, name_js, blob_js)?;
                 }

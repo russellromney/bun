@@ -1097,13 +1097,18 @@ impl BlobExt for Blob {
             }
         }
 
-        let show_name = (self.is_jsdom_file.get() && self.get_name_string().is_some())
-            || (!self.name.get().is_empty()
-                && self.store.get().is_some()
-                && matches!(
-                    self.store().expect("infallible: store present").data,
-                    store::Data::Bytes(_)
-                ));
+        // `FileRef ("path")` / S3 headers already render the path, so only
+        // emit a `name:` line for byte-backed or empty blobs whose name is
+        // not in the header.
+        let show_name = !self.is_bun_file()
+            && !self.is_s3()
+            && ((self.is_jsdom_file.get() && self.get_name_string().is_some())
+                || (!self.name.get().is_empty()
+                    && self.store.get().is_some()
+                    && matches!(
+                        self.store().expect("infallible: store present").data,
+                        store::Data::Bytes(_)
+                    )));
         if !self.is_s3()
             && (!self.content_type_slice().is_empty()
                 || self.offset.get() > 0
@@ -2177,6 +2182,13 @@ impl BlobExt for Blob {
     fn get_name(&self, _: JSValue, global_this: &JSGlobalObject) -> JsResult<JSValue> {
         Ok(match self.get_name_string() {
             Some(name) => name.to_js(global_this)?,
+            // https://w3c.github.io/FileAPI/#dfn-name — File.name is a
+            // USVString and always a string. For File-typed values with no
+            // backing path (Bun.file(fd), new File([], "")), report the
+            // empty string so `structuredClone` round-trips and matches
+            // Node / browsers. The only remaining caller that sees this arm
+            // for a plain Blob is `Bun.s3()` before a bucket is resolved.
+            None if self.is_jsdom_file.get() => JSValue::js_empty_string(global_this),
             None => JSValue::UNDEFINED,
         })
     }
@@ -3753,6 +3765,16 @@ impl BlobExt for Blob {
             return crate::webcore::s3_file::to_js_unchecked(global_object, this);
         }
 
+        // `is_jsdom_file` is the sole File/Blob prototype discriminator. Callers
+        // that construct a value meant to be a `File` (new File(), Bun.file(),
+        // Bun.stdin/out/err, embedded assets, archive entries) set this flag;
+        // callers that want a plain `Blob` clear it (slice(), Body.blob(),
+        // new Blob()). This keeps every `to_js()` call site from having to
+        // know which structure to pick.
+        if self.is_jsdom_file.get() {
+            return dom_file_to_js_unchecked(global_object, this);
+        }
+
         js::to_js_unchecked(global_object, this)
     }
 
@@ -4339,11 +4361,13 @@ fn _on_structured_clone_deserialize<B: AsRef<[u8]>>(
     let blob_ptr = scopeguard::ScopeGuard::into_inner(blob_guard);
     // SAFETY: blob_ptr is valid; toJS is infallible.
     let blob_ref = unsafe { &*blob_ptr };
-    // Preserve the prototype the source had: File for `new File()` / `Bun.file()`
-    // round-trips, Blob otherwise. `to_js` handles the S3 case.
-    if blob_ref.is_jsdom_file.get() || blob_ref.is_bun_file() {
-        blob_ref.calculate_estimated_byte_size();
-        return Ok(dom_file_to_js_unchecked(global_this, blob_ptr));
+    // `to_js` picks Blob/File/S3File prototype from the Rust-side flags
+    // (`is_jsdom_file`, `is_s3`). For a `SerializeTag::File` payload that was
+    // created by `Bun.file()`, the serialized `is_jsdom_file` byte read above
+    // is 1 and the clone gets File.prototype; for a payload older than the
+    // flag (version 1), fall back on the store type.
+    if !blob_ref.is_jsdom_file.get() && blob_ref.is_bun_file() {
+        blob_ref.is_jsdom_file.set(true);
     }
     Ok(BlobExt::to_js(blob_ref, global_this))
 }
@@ -5849,11 +5873,13 @@ pub fn construct_bun_file(
         }
     }
 
-    blob.calculate_estimated_byte_size();
-    let ptr = Blob::new(blob);
     // Bun.file() results inherit from File.prototype so the documented
-    // `.name` / `.lastModified` accessors are reachable.
-    Ok(dom_file_to_js_unchecked(global_object, ptr))
+    // `.name` / `.lastModified` accessors are reachable. `to_js()` keys on
+    // this flag to pick the File structure.
+    blob.is_jsdom_file.set(true);
+    let ptr = Blob::new(blob);
+    // SAFETY: `Blob::new` returned a fresh heap allocation.
+    Ok(unsafe { &*ptr }.to_js(global_object))
 }
 
 // `find_or_create_file_from_path`: canonical impl lives later in this file
