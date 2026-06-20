@@ -4,12 +4,14 @@
 #
 # `cargo fmt --all` formats every workspace member's crate root and follows
 # `mod` declarations from there. `vendor/lolhtml/c-api` is reachable as a path
-# dependency of `bun_lolhtml_sys`; `test/` has Rust test fixtures (e.g. the
-# tonic gRPC server) with their own out-of-workspace `Cargo.toml`; `build/` is
-# the gitignored ninja output dir (codegen .rs, cargo target dir). None should
-# be reformatted by CI even if a future change makes them reachable.
+# dependency of `bun_lolhtml_sys`; `src/deps/` holds checked-in patched
+# third-party crates consumed via `[patch.crates-io]`; `test/` has Rust test
+# fixtures (e.g. the tonic gRPC server) with their own out-of-workspace
+# `Cargo.toml`; `build/` is the gitignored ninja output dir (codegen .rs,
+# cargo target dir). None should be reformatted by CI even if a future change
+# makes them reachable.
 #
 # Patterns use gitignore semantics: a bare name like `test` matches at *any*
 # depth (it would also exclude `src/runtime/cli/test/`). Anchor with a leading
 # `/` to scope each entry to the workspace root only.
-ignore = ["/vendor", "/test", "/build"]
+ignore = ["/vendor", "/src/deps", "/test", "/build"]
