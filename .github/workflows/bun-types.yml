@@ -40,4 +40,4 @@ jobs:
           bun install
           bun install --cwd test
       - name: Check types
-        run: bun test test/integration/bun-types/bun-types.test.ts
+        run: bun test test/integration/bun-types/bun-types.test.ts test/integration/bun-types/webview-goback.test.ts
