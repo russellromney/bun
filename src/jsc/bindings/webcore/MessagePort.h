@@ -105,8 +105,8 @@ public:
 
     bool hasPendingActivity() const;
 
-    void jsRef(JSGlobalObject*);
-    void jsUnref(JSGlobalObject*);
+    void jsRef();
+    void jsUnref();
     bool jsHasRef() { return m_hasRef; }
 
 private:

@@ -350,6 +350,9 @@ describe("keeps the event loop alive while a message listener is attached", () =
 
   async function expectStaysAlive(code: string) {
     await using proc = Bun.spawn({ cmd: [bunExe(), "-e", code], env: bunEnv, stdout: "pipe", stderr: "pipe" });
+    // Drain stderr in the background so debug/ASAN warnings can't fill the OS
+    // pipe buffer and deadlock the child while it is expected to stay alive.
+    const stderrDrained = proc.stderr.text();
     // Synchronize on delivery (condition, not time) so slow ASAN/debug startup
     // does not race the decision below.
     const gotMarker = await streamHasMarker(proc.stdout, "RECEIVED");
@@ -360,7 +363,7 @@ describe("keeps the event loop alive while a message listener is attached", () =
       Bun.sleep(isDebug || isASAN ? 2000 : 750).then(() => "alive" as const),
     ]);
     proc.kill();
-    await proc.exited;
+    await Promise.all([stderrDrained, proc.exited]);
     return { gotMarker, outcome };
   }
 
@@ -370,7 +373,11 @@ describe("keeps the event loop alive while a message listener is attached", () =
     // window only elapses if it wrongly hangs (the failure we are guarding).
     const outcome = await Promise.race([
       proc.exited.then(exitCode => ({ kind: "exited" as const, exitCode, signalCode: proc.signalCode })),
-      Bun.sleep(isDebug || isASAN ? 6000 : 2500).then(() => ({ kind: "alive" as const, exitCode: -1, signalCode: null })),
+      Bun.sleep(isDebug || isASAN ? 6000 : 2500).then(() => ({
+        kind: "alive" as const,
+        exitCode: -1,
+        signalCode: null,
+      })),
     ]);
     if (outcome.kind === "alive") proc.kill();
     await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);

@@ -207,7 +207,7 @@ void MessagePort::dispatchEvent(Event& event)
 
 void MessagePort::contextDestroyed()
 {
-    // close() releases the jsRef() self-reference, which may be the last
+    // close() releases the event-loop self-reference, which may be the last
     // strong ref if the JS wrapper was already swept. Protect across the
     // call so we can cleanly detach from the dying ScriptExecutionContext
     // first — otherwise ~ContextDestructionObserver() would call back into
@@ -337,12 +337,12 @@ void MessagePort::releaseEventLoopRef()
     deref();
 }
 
-void MessagePort::jsRef(JSGlobalObject*)
+void MessagePort::jsRef()
 {
     holdEventLoopRef();
 }
 
-void MessagePort::jsUnref(JSGlobalObject*)
+void MessagePort::jsUnref()
 {
     releaseEventLoopRef();
 }
