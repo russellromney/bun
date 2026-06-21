@@ -44,6 +44,7 @@ public:
         Closed = 1ull << 0, // close() was called on this side; drops further deliveries.
         DrainScheduled = 1ull << 1, // a drain task for this side is in flight.
         Attached = 1ull << 2, // ctxId/port are valid; ok to schedule drains.
+        PeerClosed = 1ull << 3, // the peer closed; dispatch 'close' once this side's inbox drains.
 
         QueuedShift = 8,
         QueuedOne = 1ull << QueuedShift,
@@ -63,6 +64,13 @@ public:
     void attach(uint8_t side, ScriptExecutionContextIdentifier, ThreadSafeWeakPtr<MessagePort>);
     void detach(uint8_t side);
     void close(uint8_t side);
+
+    // After an explicit close, wake the peer's context so it can dispatch the
+    // one-shot 'close' event and release the event-loop ref its listener held.
+    // Called only from MessagePort::close() (user close / context teardown) and
+    // deliberately not from the GC-driven ~MessagePort path, which must not
+    // disturb a still-referenced peer.
+    void notifyPeerClosed(uint8_t peerSide);
 
     // Lockless snapshot for the GC visitor / hasPendingActivity.
     uint64_t state(uint8_t side) const { return m_sides[side].state.load(std::memory_order_acquire); }

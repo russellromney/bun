@@ -380,8 +380,8 @@ describe("keeps the event loop alive while a message listener is attached", () =
       })),
     ]);
     if (outcome.kind === "alive") proc.kill();
-    await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
-    return outcome;
+    const [stdout] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    return { ...outcome, stdout: stdout.trim() };
   }
 
   test.concurrent(".on('message') from node:worker_threads", async () => {
@@ -417,37 +417,68 @@ describe("keeps the event loop alive while a message listener is attached", () =
   });
 
   test.concurrent("unref() releases the hold so the process exits", async () => {
-    expect(
-      await expectExitsOnItsOwn(`
-        const { MessageChannel } = require("node:worker_threads");
-        const { port1, port2 } = new MessageChannel();
-        port1.on("message", () => console.log("RECEIVED"));
-        port1.unref();
-        port2.postMessage({ foo: "bar" });
-      `),
-    ).toEqual({ kind: "exited", exitCode: 0, signalCode: null });
+    const { kind, exitCode, signalCode } = await expectExitsOnItsOwn(`
+      const { MessageChannel } = require("node:worker_threads");
+      const { port1, port2 } = new MessageChannel();
+      port1.on("message", () => {});
+      port1.unref();
+      port2.postMessage({ foo: "bar" });
+    `);
+    expect({ kind, exitCode, signalCode }).toEqual({ kind: "exited", exitCode: 0, signalCode: null });
   });
 
   test.concurrent("removing the last message listener lets the process exit", async () => {
-    expect(
-      await expectExitsOnItsOwn(`
-        const { MessageChannel } = require("node:worker_threads");
-        const { port1, port2 } = new MessageChannel();
-        const listener = () => console.log("RECEIVED");
-        port1.on("message", listener);
-        port1.off("message", listener);
-        port2.postMessage({ foo: "bar" });
-      `),
-    ).toEqual({ kind: "exited", exitCode: 0, signalCode: null });
+    const { kind, exitCode, signalCode } = await expectExitsOnItsOwn(`
+      const { MessageChannel } = require("node:worker_threads");
+      const { port1, port2 } = new MessageChannel();
+      const listener = () => {};
+      port1.on("message", listener);
+      port1.off("message", listener);
+      port2.postMessage({ foo: "bar" });
+    `);
+    expect({ kind, exitCode, signalCode }).toEqual({ kind: "exited", exitCode: 0, signalCode: null });
   });
 
   test.concurrent("onmessageerror alone does not keep the process alive", async () => {
-    expect(
-      await expectExitsOnItsOwn(`
-        const { port1, port2 } = new MessageChannel();
-        port1.onmessageerror = () => {};
-        port2.postMessage({ foo: "bar" });
-      `),
-    ).toEqual({ kind: "exited", exitCode: 0, signalCode: null });
+    const { kind, exitCode, signalCode } = await expectExitsOnItsOwn(`
+      const { port1, port2 } = new MessageChannel();
+      port1.onmessageerror = () => {};
+      port2.postMessage({ foo: "bar" });
+    `);
+    expect({ kind, exitCode, signalCode }).toEqual({ kind: "exited", exitCode: 0, signalCode: null });
+  });
+
+  // https://github.com/oven-sh/bun/issues/32563
+  // Closing one end delivers a 'close' event to the peer (after any queued
+  // messages) and then lets the peer stop holding the loop, so the process
+  // exits. Without peer-close handling the message listener would pin the loop
+  // forever.
+  test.concurrent("closing a port delivers 'close' to the peer, then exits", async () => {
+    const { kind, exitCode, signalCode, stdout } = await expectExitsOnItsOwn(`
+      const { MessageChannel } = require("node:worker_threads");
+      const { port1, port2 } = new MessageChannel();
+      port2.on("message", m => console.log(m.foo));
+      port2.on("close", () => console.log("closed!"));
+      port1.postMessage({ foo: "bar" });
+      port1.close();
+    `);
+    expect({ kind, exitCode, signalCode, stdout }).toEqual({
+      kind: "exited",
+      exitCode: 0,
+      signalCode: null,
+      stdout: "bar\nclosed!",
+    });
+  });
+
+  test.concurrent("a message listener does not pin the loop once the peer closes", async () => {
+    // Mirrors node's test-worker-message-port-receive-message: a listener is
+    // attached but the peer closes, so the process must still exit.
+    const { kind, exitCode, signalCode } = await expectExitsOnItsOwn(`
+      const { MessageChannel } = require("node:worker_threads");
+      const { port1, port2 } = new MessageChannel();
+      port2.on("message", () => {});
+      port1.close();
+    `);
+    expect({ kind, exitCode, signalCode }).toEqual({ kind: "exited", exitCode: 0, signalCode: null });
   });
 });

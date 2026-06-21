@@ -109,9 +109,9 @@ void MessagePortPipe::drainAndDispatch(uint8_t side, ScriptExecutionContextIdent
         if (s.ctxId != expectedCtx)
             return;
         port = s.port.get();
-        uint64_t st = s.state.load(std::memory_order_relaxed);
-        if (!port || s.inbox.isEmpty()) {
-            s.state.store(st & ~DrainScheduled, std::memory_order_release);
+        if (!port) {
+            uint64_t st = s.state.load(std::memory_order_relaxed);
+            s.state.store(st & ~(DrainScheduled | PeerClosed), std::memory_order_release);
             return;
         }
         limit = std::max<size_t>(s.inbox.size(), 1000);
@@ -120,12 +120,13 @@ void MessagePortPipe::drainAndDispatch(uint8_t side, ScriptExecutionContextIdent
     auto* context = port->scriptExecutionContext();
     if (!context || !context->globalObject()) {
         Locker locker { s.lock };
-        s.state.fetch_and(~uint64_t(DrainScheduled), std::memory_order_acq_rel);
+        s.state.fetch_and(~uint64_t(DrainScheduled | PeerClosed), std::memory_order_acq_rel);
         return;
     }
     auto* globalObject = defaultGlobalObject(context->globalObject());
 
     ScriptExecutionContextIdentifier rescheduleCtx = 0;
+    bool peerClosed = false;
     while (true) {
         std::optional<MessageWithMessagePorts> message;
         {
@@ -141,7 +142,11 @@ void MessagePortPipe::drainAndDispatch(uint8_t side, ScriptExecutionContextIdent
                 break;
             uint64_t st = s.state.load(std::memory_order_relaxed);
             if (!(st & Attached) || s.inbox.isEmpty()) {
-                s.state.store(st & ~DrainScheduled, std::memory_order_release);
+                // Inbox drained. Consume any peer-close notification in the
+                // same store that clears DrainScheduled, so notifyPeerClosed
+                // can't lose a wakeup against this stop.
+                peerClosed = st & PeerClosed;
+                s.state.store(st & ~(DrainScheduled | PeerClosed), std::memory_order_release);
                 break;
             }
             if (limit-- == 0) {
@@ -160,11 +165,16 @@ void MessagePortPipe::drainAndDispatch(uint8_t side, ScriptExecutionContextIdent
         // which drains nextTick + microtasks on exit; match that so
         // queueMicrotask(cb) inside onmessage runs before the next message.
         if (globalObject->drainMicrotasks())
-            break; // termination pending
+            return; // termination pending
     }
 
     if (rescheduleCtx)
         scheduleDrain(side, rescheduleCtx);
+    else if (peerClosed)
+        // Peer closed and our inbox is fully drained: fire 'close' and let the
+        // port release the event-loop ref its listener held (ordered after all
+        // queued messages, matching Node).
+        port->dispatchPeerClosed();
 }
 
 std::optional<MessageWithMessagePorts> MessagePortPipe::takeOne(uint8_t side)
@@ -253,6 +263,33 @@ void MessagePortPipe::close(uint8_t side)
         // outside the lock; they may hold the last ref to pipes whose
         // destructors also take locks.
     }
+}
+
+void MessagePortPipe::notifyPeerClosed(uint8_t peerSide)
+{
+    ASSERT(peerSide < 2);
+    auto& s = m_sides[peerSide];
+
+    ScriptExecutionContextIdentifier wakeCtx = 0;
+    {
+        Locker locker { s.lock };
+        uint64_t st = s.state.load(std::memory_order_relaxed);
+        // Only an attached, still-open peer can observe the close: a detached
+        // or already-closed side has no port and no context to wake. The
+        // PeerClosed bit is consumed by drainAndDispatch under this same lock,
+        // so setting it (even if a drain is already in flight) can't be lost.
+        if (!(st & Attached) || (st & Closed) || !s.ctxId)
+            return;
+        uint64_t ns = st | PeerClosed;
+        if (!(st & DrainScheduled)) {
+            ns |= DrainScheduled;
+            wakeCtx = s.ctxId;
+        }
+        s.state.store(ns, std::memory_order_release);
+    }
+
+    if (wakeCtx)
+        scheduleDrain(peerSide, wakeCtx);
 }
 
 } // namespace WebCore

@@ -84,6 +84,12 @@ public:
     // Called by the pipe on this port's context thread with one dequeued message.
     void dispatchOneMessage(ScriptExecutionContext&, MessageWithMessagePorts&&);
 
+    // Called by the pipe on this port's context thread once the peer has closed
+    // and this side's inbox is drained. Fires the one-shot 'close' event and
+    // closes this end so it stops pinning the event loop (Node closes both ends
+    // of a channel when either side closes).
+    void dispatchPeerClosed();
+
     // Only here for JSMessagePortCustom's GC optimization; always null.
     MessagePort* locallyEntangledPort() { return nullptr; }
 
@@ -136,6 +142,7 @@ private:
     bool m_isDetached { false };
     bool m_hasMessageEventListener { false };
     bool m_hasRef { false };
+    bool m_peerClosedHandled { false };
 
     uint32_t m_messageEventCount { 0 };
     static void onDidChangeListenerImpl(EventTarget& self, const AtomString& eventType, OnDidChangeListenerKind kind);

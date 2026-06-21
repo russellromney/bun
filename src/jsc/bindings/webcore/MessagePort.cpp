@@ -116,6 +116,13 @@ void MessagePort::close()
     // it in hasPendingActivity()); marking our side Closed is sufficient.
     m_pipe->close(m_side);
 
+    // Tell the peer the channel was closed from this end so it can fire 'close'
+    // and drop the event-loop ref its listener held (Node closes both ends).
+    // This runs only on an explicit close()/context teardown; a GC-collected
+    // port tears down via ~MessagePort -> m_pipe->close() and must not disturb
+    // a still-live peer (that would make a listening peer exit early).
+    m_pipe->notifyPeerClosed(1 - m_side);
+
     // removeAllEventListeners() fires the Clear hook, which releases the ref a
     // message listener was holding. An explicit ref() with no listener leaves
     // nothing for that hook to clear, so release here too (idempotent). This
@@ -179,6 +186,31 @@ void MessagePort::dispatchOneMessage(ScriptExecutionContext& context, MessageWit
 
     auto event = MessageEvent::create(*context.jsGlobalObject(), message.message.releaseNonNull(), {}, {}, {}, WTF::move(ports));
     dispatchEvent(event.event);
+}
+
+void MessagePort::dispatchPeerClosed()
+{
+    if (m_isDetached || m_peerClosedHandled)
+        return;
+
+    auto* context = scriptExecutionContext();
+    if (!context || !context->globalObject())
+        return;
+
+    auto* globalObject = defaultGlobalObject(context->globalObject());
+    if (Zig::GlobalObject::scriptExecutionStatus(globalObject, globalObject) != ScriptExecutionStatus::Running)
+        return;
+
+    // Guard before dispatching: the 'close' handler can run arbitrary JS that
+    // re-enters a teardown path, and close() below drops the self-ref.
+    m_peerClosedHandled = true;
+    Ref protectedThis { *this };
+
+    auto event = Event::create(eventNames().closeEvent, Event::CanBubble::No, Event::IsCancelable::No);
+    dispatchEvent(event.get());
+
+    // The channel is gone; close this end so it stops pinning the event loop.
+    close();
 }
 
 JSValue MessagePort::tryTakeMessage(JSGlobalObject* lexicalGlobalObject)
