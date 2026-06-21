@@ -525,4 +525,28 @@ describe("keeps the event loop alive while a message listener is attached", () =
     `);
     expect({ kind, exitCode, signalCode }).toEqual({ kind: "exited", exitCode: 0, signalCode: null });
   });
+
+  test.concurrent("pending 'close' is delivered even if GC runs before the drain", async () => {
+    // The listening port is kept alive only by hasPendingActivity(); once the
+    // peer closes, a GC in the window before the queued drain fires must not
+    // sweep the wrapper and drop the one-shot 'close' event.
+    const { kind, exitCode, signalCode, stdout } = await expectExitsOnItsOwn(`
+      const { MessageChannel } = require("node:worker_threads");
+      function setup() {
+        const { port1, port2 } = new MessageChannel();
+        port2.on("message", () => {});
+        port2.on("close", () => console.log("CLOSED"));
+        return port1; // port2 is now reachable only via hasPendingActivity()
+      }
+      const p1 = setup();
+      p1.close();                                 // schedules port2's 'close' drain
+      for (let i = 0; i < 10; i++) Bun.gc(true);  // must not collect port2 before it fires
+    `);
+    expect({ kind, exitCode, signalCode, stdout }).toEqual({
+      kind: "exited",
+      exitCode: 0,
+      signalCode: null,
+      stdout: "CLOSED",
+    });
+  });
 });

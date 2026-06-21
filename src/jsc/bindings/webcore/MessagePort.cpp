@@ -262,9 +262,12 @@ bool MessagePort::hasPendingActivity() const
         return false;
 
     uint64_t s = m_pipe->state(m_side);
-    // Keep alive if there are messages already queued for us, or the peer
-    // is still open and could send more.
-    return MessagePortPipe::queuedCount(s) > 0 || m_pipe->isOtherSideOpen(m_side);
+    // Keep alive if there are messages already queued for us, a peer-close
+    // notification is pending (PeerClosed drains to a one-shot 'close' event),
+    // or the peer is still open and could send more. PeerClosed is cleared in
+    // the same store that dispatches 'close', so the wrapper becomes
+    // collectable again immediately after, mirroring the queued-message case.
+    return MessagePortPipe::queuedCount(s) > 0 || (s & MessagePortPipe::PeerClosed) || m_pipe->isOtherSideOpen(m_side);
 }
 
 ExceptionOr<Vector<TransferredMessagePort>> MessagePort::disentanglePorts(Vector<RefPtr<MessagePort>>&& ports)
