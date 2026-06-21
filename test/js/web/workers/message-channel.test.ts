@@ -482,4 +482,30 @@ describe("keeps the event loop alive while a message listener is attached", () =
     `);
     expect({ kind, exitCode, signalCode }).toEqual({ kind: "exited", exitCode: 0, signalCode: null });
   });
+
+  test.concurrent("adding a listener after the peer already closed still exits", async () => {
+    // close-then-listen: the peer is gone before the listener is attached, so
+    // the listener must not pin the loop (PeerClosed is observed on start()).
+    const { kind, exitCode, signalCode } = await expectExitsOnItsOwn(`
+      const { MessageChannel } = require("node:worker_threads");
+      const { port1, port2 } = new MessageChannel();
+      port1.close();
+      port2.on("message", () => {});
+    `);
+    expect({ kind, exitCode, signalCode }).toEqual({ kind: "exited", exitCode: 0, signalCode: null });
+  });
+
+  test.concurrent("dropping an in-transit transferred port releases its listening peer", async () => {
+    // A port transferred inside a message that is never delivered (its holder
+    // is closed) must notify its sibling so a listener there doesn't pin the loop.
+    const { kind, exitCode, signalCode } = await expectExitsOnItsOwn(`
+      const { MessageChannel } = require("node:worker_threads");
+      const main = new MessageChannel();
+      const sub = new MessageChannel();
+      sub.port2.on("message", () => {});
+      main.port1.postMessage(null, [sub.port1]); // sub.port1 sits undelivered in main.port2's inbox
+      main.port2.close();                        // dropping it must release sub.port2
+    `);
+    expect({ kind, exitCode, signalCode }).toEqual({ kind: "exited", exitCode: 0, signalCode: null });
+  });
 });

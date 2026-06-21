@@ -62,8 +62,11 @@ MessagePort::MessagePort(ScriptExecutionContext& context, Ref<MessagePortPipe>&&
 
 MessagePort::~MessagePort()
 {
+    // GC-driven teardown: close our pipe side but don't notify the peer. A
+    // still-referenced peer with a listener must stay alive when an idle port
+    // is collected (an explicit close() goes through MessagePort::close()).
     if (!m_isDetached)
-        m_pipe->close(m_side);
+        m_pipe->close(m_side, /*notifyPeers=*/false);
 }
 
 ExceptionOr<void> MessagePort::postMessage(JSC::JSGlobalObject& state, JSC::JSValue messageValue, StructuredSerializeOptions&& options)
@@ -112,16 +115,12 @@ void MessagePort::close()
         return;
     m_isDetached = true;
 
-    // m_pipe is held for the port's whole lifetime (the GC thread reads
-    // it in hasPendingActivity()); marking our side Closed is sufficient.
-    m_pipe->close(m_side);
-
-    // Tell the peer the channel was closed from this end so it can fire 'close'
-    // and drop the event-loop ref its listener held (Node closes both ends).
-    // This runs only on an explicit close()/context teardown; a GC-collected
-    // port tears down via ~MessagePort -> m_pipe->close() and must not disturb
-    // a still-live peer (that would make a listening peer exit early).
-    m_pipe->notifyPeerClosed(1 - m_side);
+    // m_pipe is held for the port's whole lifetime (the GC thread reads it in
+    // hasPendingActivity()). notifyPeers=true tells the peer (and any in-transit
+    // ports in our dropped inbox) the channel closed from this end, so a
+    // listening peer fires 'close' and drops its event-loop ref (Node closes
+    // both ends). Unlike ~MessagePort, this is an explicit close.
+    m_pipe->close(m_side, /*notifyPeers=*/true);
 
     // removeAllEventListeners() fires the Clear hook, which releases the ref a
     // message listener was holding. An explicit ref() with no listener leaves

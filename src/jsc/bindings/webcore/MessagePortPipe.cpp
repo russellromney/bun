@@ -23,16 +23,17 @@ TransferredMessagePort::~TransferredMessagePort()
 {
     // If this endpoint is destroyed while still owning the pipe side (never
     // handed off to a new MessagePort via entangle()), the side is orphaned;
-    // mark it Closed so the peer's hasPendingActivity() can return false.
+    // mark it Closed so the peer's hasPendingActivity() can return false. This
+    // is a drop, not an explicit close, so don't actively disturb the peer.
     if (pipe)
-        pipe->close(side);
+        pipe->close(side, /*notifyPeers=*/false);
 }
 
 TransferredMessagePort& TransferredMessagePort::operator=(TransferredMessagePort&& other)
 {
     if (this != &other) {
         if (pipe)
-            pipe->close(side);
+            pipe->close(side, /*notifyPeers=*/false);
         pipe = WTF::move(other.pipe);
         side = other.side;
     }
@@ -199,7 +200,10 @@ void MessagePortPipe::attach(uint8_t side, ScriptExecutionContextIdentifier ctxI
         s.port = WTF::move(port);
         uint64_t st = s.state.load(std::memory_order_relaxed);
         uint64_t ns = (st | Attached) & ~Closed;
-        if (queuedCount(st) > 0 && !(st & DrainScheduled)) {
+        // Drain if messages are queued (e.g. after transfer) or the peer closed
+        // before this side started listening (PeerClosed set by notifyPeerClosed
+        // while unattached) — the latter lets a late listener still get 'close'.
+        if ((queuedCount(st) > 0 || (st & PeerClosed)) && !(st & DrainScheduled)) {
             ns |= DrainScheduled;
             wakeCtx = ctxId;
         }
@@ -224,7 +228,7 @@ void MessagePortPipe::detach(uint8_t side)
     s.state.fetch_and(~uint64_t(Attached | DrainScheduled), std::memory_order_acq_rel);
 }
 
-void MessagePortPipe::close(uint8_t side)
+void MessagePortPipe::close(uint8_t side, bool notifyPeers)
 {
     ASSERT(side < 2);
 
@@ -251,6 +255,13 @@ void MessagePortPipe::close(uint8_t side)
             dropped = std::exchange(s.inbox, {});
         }
 
+        // On an explicit close, wake the peer of each side we tear down (the
+        // closed side and every in-transit port harvested below) so a listening
+        // peer fires 'close' and drops its event-loop ref. Done outside s.lock;
+        // notifyPeerClosed takes the peer side's lock, never this one.
+        if (notifyPeers)
+            pipe->notifyPeerClosed(1 - sd);
+
         // Harvest transferred pipes before `dropped` destructs so their
         // ~TransferredMessagePort sees pipe == nullptr and is a no-op.
         for (auto& message : dropped) {
@@ -274,14 +285,16 @@ void MessagePortPipe::notifyPeerClosed(uint8_t peerSide)
     {
         Locker locker { s.lock };
         uint64_t st = s.state.load(std::memory_order_relaxed);
-        // Only an attached, still-open peer can observe the close: a detached
-        // or already-closed side has no port and no context to wake. The
-        // PeerClosed bit is consumed by drainAndDispatch under this same lock,
-        // so setting it (even if a drain is already in flight) can't be lost.
-        if (!(st & Attached) || (st & Closed) || !s.ctxId)
+        // A side that already closed has nothing to observe.
+        if (st & Closed)
             return;
+        // Record the close even if this side hasn't started listening yet:
+        // attach() picks up PeerClosed and schedules the drain, so a listener
+        // added after the peer closed still gets 'close'. If it is already
+        // attached, wake it now. The bit is consumed by drainAndDispatch under
+        // this same lock, so it can't be lost against a concurrent drain.
         uint64_t ns = st | PeerClosed;
-        if (!(st & DrainScheduled)) {
+        if ((st & Attached) && s.ctxId && !(st & DrainScheduled)) {
             ns |= DrainScheduled;
             wakeCtx = s.ctxId;
         }
