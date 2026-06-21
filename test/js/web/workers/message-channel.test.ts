@@ -441,6 +441,7 @@ describe("keeps the event loop alive while a message listener is attached", () =
 
   test.concurrent("onmessageerror alone does not keep the process alive", async () => {
     const { kind, exitCode, signalCode } = await expectExitsOnItsOwn(`
+      const { MessageChannel } = require("node:worker_threads");
       const { port1, port2 } = new MessageChannel();
       port1.onmessageerror = () => {};
       port2.postMessage({ foo: "bar" });
