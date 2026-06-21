@@ -1,8 +1,8 @@
 import { semver, write } from "bun";
 import { afterAll, beforeEach, describe, expect, it } from "bun:test";
 import fs from "fs";
-import { bunEnv, bunExe, isLinux, isWindows, nodeExe, runBunInstall, shellExe, tmpdirSync } from "harness";
-import { ChildProcess, exec, execFile, execFileSync, execSync, spawn, spawnSync } from "node:child_process";
+import { bunEnv, bunExe, isLinux, isWindows, nodeExe, runBunInstall, shellExe, tempDir, tmpdirSync } from "harness";
+import { ChildProcess, exec, execFile, execFileSync, execSync, fork, spawn, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import path from "path";
 const debug = process.env.DEBUG ? console.log : () => {};
@@ -608,4 +608,40 @@ it.skipIf(isWindows)("extra stdio pipes are not double-closed on GC", async () =
   });
   const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
   expect({ stdout: stdout.trim(), stderr, exitCode }).toEqual({ stdout: "OK", stderr: "", exitCode: 0 });
+});
+
+// https://github.com/oven-sh/bun/issues/32567
+// A message the parent sends before the forked child has attached its listener
+// sits in the IPC pipe buffer until the child adopts the channel. It must be
+// delivered on the child's startup turn (before the first setImmediate runs),
+// matching Node, rather than one event-loop iteration later.
+it.skipIf(isWindows)("fork: a message queued before the child is ready is delivered before setImmediate", async () => {
+  using dir = tempDir("fork-ipc-startup-order", {
+    "child.js": `
+      let immediateFired = false;
+      setImmediate(() => {
+        immediateFired = true;
+      });
+      process.on("message", message => {
+        process.send({ immediateFired, received: message });
+      });
+    `,
+  });
+
+  const { promise, resolve, reject } = Promise.withResolvers<any>();
+  const child = fork(path.join(String(dir), "child.js"), { env: bunEnv });
+  child.once("message", resolve);
+  child.once("error", reject);
+  child.once("exit", code => reject(new Error(`child exited before replying (code ${code})`)));
+
+  // Sent before the child has booted and attached its listener.
+  child.send({ hello: "world" });
+
+  try {
+    const message = await promise;
+    expect(message).toEqual({ immediateFired: false, received: { hello: "world" } });
+  } finally {
+    if (child.connected) child.disconnect();
+    child.kill();
+  }
 });
