@@ -202,8 +202,8 @@ static inline bool setJSMessagePort_onmessageSetter(JSGlobalObject& lexicalGloba
     vm.writeBarrier(&thisObject, value);
     ensureStillAliveHere(value);
 
-    thisObject.wrapped().jsRef(&lexicalGlobalObject);
-
+    // Assigning onmessage registers a message listener, which refs the event
+    // loop via MessagePort::onDidChangeListenerImpl; no separate ref needed.
     return true;
 }
 
@@ -231,8 +231,8 @@ static inline bool setJSMessagePort_onmessageerrorSetter(JSGlobalObject& lexical
     vm.writeBarrier(&thisObject, value);
     ensureStillAliveHere(value);
 
-    thisObject.wrapped().jsRef(&lexicalGlobalObject);
-
+    // A messageerror listener alone does not keep the event loop alive (Node
+    // only refs on 'message'), so do not ref here.
     return true;
 }
 

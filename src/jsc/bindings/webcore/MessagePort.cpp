@@ -36,8 +36,6 @@
 #include "WebCoreOpaqueRoot.h"
 #include <wtf/TZoneMallocInlines.h>
 
-extern "C" void Bun__eventLoop__incrementRefConcurrently(void* bunVM, int delta);
-
 namespace WebCore {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(MessagePort);
@@ -54,6 +52,12 @@ MessagePort::MessagePort(ScriptExecutionContext& context, Ref<MessagePortPipe>&&
 {
     // The WeakPtrFactory must be initialized on the owning thread.
     initializeWeakPtrFactory();
+
+    // Every port refs the event loop while it has a message listener, whether
+    // it came from a transfer or is a local MessageChannel end. Without this,
+    // port.on('message', ...) on a local port would not keep the process
+    // alive the way Node does.
+    onDidChangeListener = &MessagePort::onDidChangeListenerImpl;
 }
 
 MessagePort::~MessagePort()
@@ -112,21 +116,13 @@ void MessagePort::close()
     // it in hasPendingActivity()); marking our side Closed is sufficient.
     m_pipe->close(m_side);
 
+    // removeAllEventListeners() fires the Clear hook, which releases the ref a
+    // message listener was holding. An explicit ref() with no listener leaves
+    // nothing for that hook to clear, so release here too (idempotent). This
+    // also covers contextDestroyed() during Worker teardown, where without it
+    // the self-ref would pin the MessagePort past the JS wrapper sweep.
     removeAllEventListeners();
-
-    // Release the self-reference taken by jsRef() (set when .onmessage is
-    // assigned or .ref() is called from JS). The JS .close() binding calls
-    // jsUnref() first, so m_hasRef is already false on that path; we only
-    // reach this branch when close() runs without a preceding jsUnref() —
-    // most importantly from contextDestroyed() during Worker teardown.
-    // Without this, the self-ref pins the MessagePort past the JS wrapper
-    // sweep and it leaks forever.
-    if (m_hasRef) {
-        m_hasRef = false;
-        if (auto* context = scriptExecutionContext())
-            context->unrefEventLoop();
-        deref();
-    }
+    releaseEventLoopRef();
 }
 
 TransferredMessagePort MessagePort::disentangle()
@@ -135,21 +131,11 @@ TransferredMessagePort MessagePort::disentangle()
 
     // Drop any message listeners (and the event-loop ref they carry) while
     // this port is still attached to its context; after observeContext(null)
-    // there would be nothing to unref.
+    // there would be nothing to unref. The caller (disentanglePorts) holds a
+    // RefPtr, so the deref() inside releaseEventLoopRef() is safe.
     removeAllEventListeners();
     m_hasMessageEventListener = false;
-
-    // Release the self-reference taken by jsRef() on the sending side. After
-    // transfer this object is inert (the receiving side gets a fresh
-    // MessagePort for the same pipe endpoint) and is no longer a destruction
-    // observer, so nothing else will ever release a ref taken here.
-    // The caller (disentanglePorts) holds a RefPtr, so deref() is safe.
-    if (m_hasRef) {
-        m_hasRef = false;
-        if (auto* context = scriptExecutionContext())
-            context->unrefEventLoop();
-        deref();
-    }
+    releaseEventLoopRef();
 
     // Hand the pipe endpoint to its next owner. Messages that arrive while
     // in transit buffer in the pipe; the receiving context's entangle()
@@ -170,12 +156,7 @@ TransferredMessagePort MessagePort::disentangle()
 Ref<MessagePort> MessagePort::entangle(ScriptExecutionContext& context, TransferredMessagePort&& transferred)
 {
     ASSERT(transferred.pipe);
-    auto port = MessagePort::create(context, transferred.pipe.releaseNonNull(), transferred.side);
-    // Only transferred ports ref the event loop on message-listener
-    // add/remove; ports that were never transferred (both ends of a local
-    // MessageChannel) don't hold the process open.
-    port->onDidChangeListener = &MessagePort::onDidChangeListenerImpl;
-    return port;
+    return MessagePort::create(context, transferred.pipe.releaseNonNull(), transferred.side);
 }
 
 void MessagePort::dispatchOneMessage(ScriptExecutionContext& context, MessageWithMessagePorts&& message)
@@ -286,22 +267,23 @@ void MessagePort::onDidChangeListenerImpl(EventTarget& self, const AtomString& e
     if (eventType != eventNames().messageEvent)
         return;
 
+    // Adding the first message listener refs the event loop; removing the last
+    // one unrefs it. An explicit ref() shares the same m_hasRef flag, so (as in
+    // Node) removing the last listener releases the hold regardless of ref().
     auto& port = static_cast<MessagePort&>(self);
-    auto* context = port.scriptExecutionContext();
     switch (kind) {
     case Add:
-        if (port.m_messageEventCount == 0 && context)
-            context->refEventLoop();
+        if (port.m_messageEventCount == 0)
+            port.holdEventLoopRef();
         port.m_messageEventCount++;
         break;
     case Remove:
-        port.m_messageEventCount--;
-        if (port.m_messageEventCount == 0 && context)
-            context->unrefEventLoop();
+        if (port.m_messageEventCount > 0 && --port.m_messageEventCount == 0)
+            port.releaseEventLoopRef();
         break;
     case Clear:
-        if (port.m_messageEventCount > 0 && context)
-            context->unrefEventLoop();
+        if (port.m_messageEventCount > 0)
+            port.releaseEventLoopRef();
         port.m_messageEventCount = 0;
         break;
     }
@@ -329,29 +311,40 @@ WebCoreOpaqueRoot root(MessagePort* port)
     return WebCoreOpaqueRoot { port };
 }
 
-void MessagePort::jsRef(JSGlobalObject* lexicalGlobalObject)
+void MessagePort::holdEventLoopRef()
 {
     // A closed or transferred-away port can never receive messages again, so
     // taking a self-ref (and an event-loop ref) here would only leak:
     // close()/disentangle() have already run and nothing will ever release a
     // ref taken afterwards.
-    if (!isEntangled())
+    if (m_hasRef || !isEntangled())
         return;
 
-    if (!m_hasRef) {
-        m_hasRef = true;
-        ref();
-        Bun__eventLoop__incrementRefConcurrently(WebCore::clientData(lexicalGlobalObject->vm())->bunVM, 1);
-    }
+    m_hasRef = true;
+    ref();
+    if (auto* context = scriptExecutionContext())
+        context->refEventLoop();
 }
 
-void MessagePort::jsUnref(JSGlobalObject* lexicalGlobalObject)
+void MessagePort::releaseEventLoopRef()
 {
-    if (m_hasRef) {
-        m_hasRef = false;
-        deref();
-        Bun__eventLoop__incrementRefConcurrently(WebCore::clientData(lexicalGlobalObject->vm())->bunVM, -1);
-    }
+    if (!m_hasRef)
+        return;
+
+    m_hasRef = false;
+    if (auto* context = scriptExecutionContext())
+        context->unrefEventLoop();
+    deref();
+}
+
+void MessagePort::jsRef(JSGlobalObject*)
+{
+    holdEventLoopRef();
+}
+
+void MessagePort::jsUnref(JSGlobalObject*)
+{
+    releaseEventLoopRef();
 }
 
 } // namespace WebCore

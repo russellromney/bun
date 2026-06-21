@@ -112,6 +112,13 @@ public:
 private:
     MessagePort(ScriptExecutionContext&, Ref<MessagePortPipe>&&, uint8_t side);
 
+    // Keep/release a single event-loop ref plus a self-ref while the port has
+    // a reason to stay open (a message listener, or an explicit ref()). Both
+    // are idempotent and balanced through m_hasRef, mirroring the ref state of
+    // Node's underlying MessagePort handle.
+    void holdEventLoopRef();
+    void releaseEventLoopRef();
+
     bool addEventListener(const AtomString& eventType, Ref<EventListener>&&, const AddEventListenerOptions&) final;
     bool removeEventListener(const AtomString& eventType, EventListener&, const EventListenerOptions&) final;
 

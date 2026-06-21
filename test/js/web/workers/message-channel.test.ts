@@ -1,3 +1,5 @@
+import { bunEnv, bunExe, isASAN, isDebug } from "harness";
+
 test("simple usage", done => {
   const channel = new MessageChannel();
   const port1 = channel.port1;
@@ -322,4 +324,123 @@ test("cloneable and non-transferable equals (net.BlockList)", async () => {
   };
   mc.port2.postMessage(blocklist);
   await promise;
+});
+
+// https://github.com/oven-sh/bun/issues/32562
+// A local MessageChannel port with a message listener must keep the event loop
+// alive like Node, whether the listener is attached with .on('message'),
+// addEventListener('message'), or the .onmessage setter. ref()/unref() and
+// listener removal modulate that hold.
+describe("keeps the event loop alive while a message listener is attached", () => {
+  async function streamHasMarker(stream: ReadableStream<Uint8Array>, marker: string) {
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    try {
+      while (!buf.includes(marker)) {
+        const { done, value } = await reader.read();
+        if (done) return false;
+        buf += decoder.decode(value, { stream: true });
+      }
+      return true;
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
+  async function expectStaysAlive(code: string) {
+    await using proc = Bun.spawn({ cmd: [bunExe(), "-e", code], env: bunEnv, stdout: "pipe", stderr: "pipe" });
+    // Synchronize on delivery (condition, not time) so slow ASAN/debug startup
+    // does not race the decision below.
+    const gotMarker = await streamHasMarker(proc.stdout, "RECEIVED");
+    // After delivery the buggy build exits within milliseconds; a real keep
+    // alive hangs. A short window cleanly separates the two.
+    const outcome = await Promise.race([
+      proc.exited.then(() => "exited" as const),
+      Bun.sleep(isDebug || isASAN ? 2000 : 750).then(() => "alive" as const),
+    ]);
+    proc.kill();
+    await proc.exited;
+    return { gotMarker, outcome };
+  }
+
+  async function expectExitsOnItsOwn(code: string) {
+    await using proc = Bun.spawn({ cmd: [bunExe(), "-e", code], env: bunEnv, stdout: "pipe", stderr: "pipe" });
+    // Generous upper bound: a process that exits resolves this fast; the full
+    // window only elapses if it wrongly hangs (the failure we are guarding).
+    const outcome = await Promise.race([
+      proc.exited.then(exitCode => ({ kind: "exited" as const, exitCode, signalCode: proc.signalCode })),
+      Bun.sleep(isDebug || isASAN ? 6000 : 2500).then(() => ({ kind: "alive" as const, exitCode: -1, signalCode: null })),
+    ]);
+    if (outcome.kind === "alive") proc.kill();
+    await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    return outcome;
+  }
+
+  test.concurrent(".on('message') from node:worker_threads", async () => {
+    expect(
+      await expectStaysAlive(`
+        const { MessageChannel } = require("node:worker_threads");
+        const { port1, port2 } = new MessageChannel();
+        port1.on("message", () => console.log("RECEIVED"));
+        port2.postMessage({ foo: "bar" });
+      `),
+    ).toEqual({ gotMarker: true, outcome: "alive" });
+  });
+
+  test.concurrent("addEventListener('message') (web API)", async () => {
+    expect(
+      await expectStaysAlive(`
+        const { port1, port2 } = new MessageChannel();
+        port1.addEventListener("message", () => console.log("RECEIVED"));
+        port1.start();
+        port2.postMessage({ foo: "bar" });
+      `),
+    ).toEqual({ gotMarker: true, outcome: "alive" });
+  });
+
+  test.concurrent(".onmessage setter", async () => {
+    expect(
+      await expectStaysAlive(`
+        const { port1, port2 } = new MessageChannel();
+        port1.onmessage = () => console.log("RECEIVED");
+        port2.postMessage({ foo: "bar" });
+      `),
+    ).toEqual({ gotMarker: true, outcome: "alive" });
+  });
+
+  test.concurrent("unref() releases the hold so the process exits", async () => {
+    expect(
+      await expectExitsOnItsOwn(`
+        const { MessageChannel } = require("node:worker_threads");
+        const { port1, port2 } = new MessageChannel();
+        port1.on("message", () => console.log("RECEIVED"));
+        port1.unref();
+        port2.postMessage({ foo: "bar" });
+      `),
+    ).toEqual({ kind: "exited", exitCode: 0, signalCode: null });
+  });
+
+  test.concurrent("removing the last message listener lets the process exit", async () => {
+    expect(
+      await expectExitsOnItsOwn(`
+        const { MessageChannel } = require("node:worker_threads");
+        const { port1, port2 } = new MessageChannel();
+        const listener = () => console.log("RECEIVED");
+        port1.on("message", listener);
+        port1.off("message", listener);
+        port2.postMessage({ foo: "bar" });
+      `),
+    ).toEqual({ kind: "exited", exitCode: 0, signalCode: null });
+  });
+
+  test.concurrent("onmessageerror alone does not keep the process alive", async () => {
+    expect(
+      await expectExitsOnItsOwn(`
+        const { port1, port2 } = new MessageChannel();
+        port1.onmessageerror = () => {};
+        port2.postMessage({ foo: "bar" });
+      `),
+    ).toEqual({ kind: "exited", exitCode: 0, signalCode: null });
+  });
 });
