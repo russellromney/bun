@@ -11,6 +11,7 @@
 
 #include "MessagePortPipe.h"
 #include "ScriptExecutionContext.h"
+#include <tuple>
 #include <wtf/Locker.h>
 
 namespace WebCore {
@@ -238,11 +239,14 @@ void MessagePortPipe::close(uint8_t side, bool notifyPeers)
     // chain of nested transferred ports overflows the native stack. Drain the
     // cascade iteratively instead: steal transferred pipes from each batch of
     // dropped messages into a stack-local worklist and close them in a loop.
-    Vector<std::pair<RefPtr<MessagePortPipe>, uint8_t>> worklist;
-    worklist.append({ this, side });
+    // The bool is whether to notify that side's peer: notifyPeers for the
+    // top-level side, always true for harvested in-transit ports (their channel
+    // is dead once the carrier is dropped, regardless of how the carrier died).
+    Vector<std::tuple<RefPtr<MessagePortPipe>, uint8_t, bool>> worklist;
+    worklist.append({ this, side, notifyPeers });
 
     while (!worklist.isEmpty()) {
-        auto [pipe, sd] = worklist.takeLast();
+        auto [pipe, sd, notify] = worklist.takeLast();
         auto& s = pipe->m_sides[sd];
 
         Deque<MessageWithMessagePorts> dropped;
@@ -255,19 +259,19 @@ void MessagePortPipe::close(uint8_t side, bool notifyPeers)
             dropped = std::exchange(s.inbox, {});
         }
 
-        // On an explicit close, wake the peer of each side we tear down (the
-        // closed side and every in-transit port harvested below) so a listening
-        // peer fires 'close' and drops its event-loop ref. Done outside s.lock;
-        // notifyPeerClosed takes the peer side's lock, never this one.
-        if (notifyPeers)
+        // Wake this side's peer (if listening) so it fires 'close' and drops its
+        // event-loop ref. Done outside s.lock; notifyPeerClosed takes the peer
+        // side's lock, never this one.
+        if (notify)
             pipe->notifyPeerClosed(1 - sd);
 
         // Harvest transferred pipes before `dropped` destructs so their
-        // ~TransferredMessagePort sees pipe == nullptr and is a no-op.
+        // ~TransferredMessagePort sees pipe == nullptr and is a no-op. Their
+        // peers are always notified: a dropped in-transit port is undeliverable.
         for (auto& message : dropped) {
             for (auto& tp : message.transferredPorts) {
                 if (auto p = std::exchange(tp.pipe, nullptr))
-                    worklist.append({ WTF::move(p), tp.side });
+                    worklist.append({ WTF::move(p), tp.side, true });
             }
         }
         // `dropped` (and the RefPtr in the structured binding) destruct

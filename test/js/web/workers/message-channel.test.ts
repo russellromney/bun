@@ -508,4 +508,21 @@ describe("keeps the event loop alive while a message listener is attached", () =
     `);
     expect({ kind, exitCode, signalCode }).toEqual({ kind: "exited", exitCode: 0, signalCode: null });
   });
+
+  test.concurrent("an in-transit transferred port dropped by GC (not close) still releases its peer", async () => {
+    // Same as above but the holder is collected, not explicitly closed: the
+    // harvested in-transit port is undeliverable, so its listening sibling must
+    // be notified even though the GC teardown path does not notify direct peers.
+    const { kind, exitCode, signalCode } = await expectExitsOnItsOwn(`
+      const { MessageChannel } = require("node:worker_threads");
+      const sub = new MessageChannel();
+      sub.port2.on("message", () => {});
+      (() => {
+        const main = new MessageChannel();
+        main.port1.postMessage(null, [sub.port1]); // sub.port1 held undelivered in main.port2's inbox
+      })();                                         // main is now unreferenced
+      for (let i = 0; i < 10; i++) Bun.gc(true);    // collecting main drops sub.port1
+    `);
+    expect({ kind, exitCode, signalCode }).toEqual({ kind: "exited", exitCode: 0, signalCode: null });
+  });
 });
