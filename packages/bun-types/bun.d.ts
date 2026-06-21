@@ -2799,8 +2799,9 @@ declare module "bun" {
      * start times, but will make the final output larger and slightly increase
      * memory usage.
      *
-     * - CommonJS: works with or without `compile: true`
-     * - ESM: requires `compile: true`
+     * Works for both CommonJS and ESM output, with or without `compile: true`.
+     * Without `compile`, the bytecode is written to a `.jsc` sidecar next to
+     * each `.js` chunk and loaded automatically at runtime.
      *
      * Without an explicit `format`, defaults to CommonJS.
      *
