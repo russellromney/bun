@@ -22,10 +22,14 @@ MessagePortPipe::~MessagePortPipe() = default;
 // MessagePortPipe.h → MessageWithMessagePorts.h → TransferredMessagePort.h.
 TransferredMessagePort::~TransferredMessagePort()
 {
-    // If this endpoint is destroyed while still owning the pipe side (never
-    // handed off to a new MessagePort via entangle()), the side is orphaned;
-    // mark it Closed so the peer's hasPendingActivity() can return false. This
-    // is a drop, not an explicit close, so don't actively disturb the peer.
+    // Destroyed while still owning the pipe side: the endpoint was disentangled
+    // for transfer but never handed to a new MessagePort via entangle() (e.g. a
+    // transfer dropped by send() to a closed peer). Mark it Closed so the peer's
+    // hasPendingActivity() reports false. notifyPeers=false: actively waking the
+    // peer here schedules a 'close' drain that perturbs GC finalization timing
+    // for the dropped endpoint (a dropped in-transit port whose sibling is
+    // listening is covered by the close()-worklist path instead). See the
+    // "transfer to an already-closed port" known limitation in the PR.
     if (pipe)
         pipe->close(side, /*notifyPeers=*/false);
 }
