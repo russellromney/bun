@@ -2315,7 +2315,6 @@ impl VirtualMachine {
                     // SAFETY: hook contract.
                     let p = unsafe { (hooks.load_preloads)(self) }?;
                     if !p.is_null() {
-                        JSValue::from_cell(p).ensure_still_alive();
                         self.set_pending_internal_promise(Some(p));
                         return Ok(p);
                     }
@@ -2363,7 +2362,6 @@ impl VirtualMachine {
             };
 
             self.set_pending_internal_promise(Some(promise));
-            JSValue::from_cell(promise).ensure_still_alive();
             Ok(promise)
         } else {
             let global = self.global;
@@ -2373,7 +2371,6 @@ impl VirtualMachine {
                     .map(NonNull::as_ptr)
                     .ok_or_else(|| bun_core::err!("JSError"))?;
             self.set_pending_internal_promise(Some(promise));
-            JSValue::from_cell(promise).ensure_still_alive();
             Ok(promise)
         }
     }
@@ -4518,7 +4515,6 @@ impl VirtualMachine {
                 // SAFETY: hook contract.
                 let p = unsafe { (hooks.load_preloads)(self) }?;
                 if !p.is_null() {
-                    JSValue::from_cell(p).ensure_still_alive();
                     self.set_pending_internal_promise(Some(p));
                     return Ok(p);
                 }
@@ -4532,7 +4528,6 @@ impl VirtualMachine {
             .map(NonNull::as_ptr)
             .ok_or_else(|| bun_core::err!("JSError"))?;
         self.set_pending_internal_promise(Some(promise));
-        JSValue::from_cell(promise).ensure_still_alive();
         Ok(promise)
     }
 
