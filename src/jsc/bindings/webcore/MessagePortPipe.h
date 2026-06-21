@@ -63,12 +63,14 @@ public:
     // means "just buffer, don't dispatch" (used before start()).
     void attach(uint8_t side, ScriptExecutionContextIdentifier, ThreadSafeWeakPtr<MessagePort>);
     void detach(uint8_t side);
-    // notifyPeers wakes the peer of every side this call tears down (the closed
-    // side plus any in-transit ports harvested from its dropped inbox) so each
-    // peer can fire 'close' and drop the event-loop ref its listener held. Only
-    // an explicit MessagePort::close() / context teardown passes true; the
+    // notifyPeers governs only the direct peer of `side`: when true it is woken
+    // to fire 'close' and drop the event-loop ref its listener held. Only an
+    // explicit MessagePort::close() / context teardown passes true; the
     // GC-driven ~MessagePort and dropped-TransferredMessagePort paths pass false
     // so collecting an idle port does not make a still-referenced peer exit.
+    // In-transit ports harvested from this side's dropped inbox always notify
+    // their peers regardless of this flag, since their channel is dead once the
+    // carrier is dropped however it died.
     void close(uint8_t side, bool notifyPeers);
 
     // Record that peerSide's peer has closed and, if peerSide is already

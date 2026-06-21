@@ -26,10 +26,12 @@ TransferredMessagePort::~TransferredMessagePort()
     // for transfer but never handed to a new MessagePort via entangle() (e.g. a
     // transfer dropped by send() to a closed peer). Mark it Closed so the peer's
     // hasPendingActivity() reports false. notifyPeers=false: actively waking the
-    // peer here schedules a 'close' drain that perturbs GC finalization timing
-    // for the dropped endpoint (a dropped in-transit port whose sibling is
-    // listening is covered by the close()-worklist path instead). See the
-    // "transfer to an already-closed port" known limitation in the PR.
+    // peer here schedules a 'close' drain that shifts GC finalization timing for
+    // the dropped endpoint enough to break an existing leak test (the wrappers
+    // are still collected, so it is a timing artifact, not a real leak), so a
+    // listening sibling of a port transferred to an already-closed peer is a
+    // known gap. A port dropped from a live port's inbox is instead handled by
+    // the close()-worklist path, which does notify harvested peers.
     if (pipe)
         pipe->close(side, /*notifyPeers=*/false);
 }
