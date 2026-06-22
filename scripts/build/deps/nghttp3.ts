@@ -64,10 +64,12 @@ export const nghttp3: Dependency = {
 
 /**
  * Platform feature defines, mirroring Node.js's deps/ngtcp2/ngtcp2.gyp:
- * non-Windows gets HAVE_UNISTD_H, Linux additionally the byte-order headers,
- * Windows routes through a hand-written config.h (ssize_t + popcount shims).
- * Everything else (HAVE_ENDIAN_H, HAVE_DECL_BSWAP_64, ...) stays undefined and
- * the libraries fall back to their portable byte-swap implementations.
+ * non-Windows gets HAVE_UNISTD_H plus the socket byte-order headers
+ * (arpa/inet.h, netinet/in.h — present on every POSIX target we build, and
+ * required for the ntohs/ntohl calls in *_conv.c), Windows routes through a
+ * hand-written config.h (ssize_t + popcount shims). Everything else
+ * (HAVE_ENDIAN_H, HAVE_DECL_BSWAP_64, ...) stays undefined and the libraries
+ * fall back to their portable byte-swap implementations.
  */
 export function platformDefines(cfg: Config): Record<string, string | number | true> {
   if (cfg.windows) {
@@ -75,7 +77,8 @@ export function platformDefines(cfg: Config): Record<string, string | number | t
   }
   return {
     HAVE_UNISTD_H: 1,
-    ...(cfg.linux && { HAVE_ARPA_INET_H: 1, HAVE_NETINET_IN_H: 1 }),
+    HAVE_ARPA_INET_H: 1,
+    HAVE_NETINET_IN_H: 1,
   };
 }
 
