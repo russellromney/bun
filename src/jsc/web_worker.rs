@@ -676,7 +676,11 @@ impl WebWorker {
     /// Takes `*mut` for the same reason as `set_ref`: the worker thread
     /// concurrently dereferences this struct.
     #[unsafe(export_name = "WebWorker__getEventLoopUtilization")]
-    pub extern "C" fn get_event_loop_utilization(this: *mut WebWorker, idle_ms_out: *mut f64, active_ms_out: *mut f64) {
+    pub extern "C" fn get_event_loop_utilization(
+        this: *mut WebWorker,
+        idle_ms_out: *mut f64,
+        active_ms_out: *mut f64,
+    ) {
         // SAFETY: out-params are valid, writable pointers supplied by C++.
         unsafe {
             *idle_ms_out = 0.0;
