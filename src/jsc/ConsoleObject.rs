@@ -834,10 +834,8 @@ impl<'a> TablePrinter<'a> {
             };
             let needed = columns[0].width.saturating_sub(len);
 
-            // Right-align the number column
-            writer
-                .splat_byte_all(b' ', (needed + PADDING) as usize)
-                .ok();
+            // Left-align the index column, matching Node's `console.table`.
+            writer.splat_byte_all(b' ', PADDING as usize).ok();
             match &row_key {
                 RowKey::Str(value) => {
                     write!(writer, "{value}").ok();
@@ -846,7 +844,9 @@ impl<'a> TablePrinter<'a> {
                     write!(writer, "{value}").ok();
                 }
             }
-            writer.splat_byte_all(b' ', PADDING as usize).ok();
+            writer
+                .splat_byte_all(b' ', (needed + PADDING) as usize)
+                .ok();
         }
 
         for col_idx in 1..columns.len() {
@@ -939,9 +939,16 @@ impl<'a> TablePrinter<'a> {
         // reshaped for borrowck — re-borrow through the guard.
         let columns: &mut Vec<Column> = &mut **_deref_names;
 
-        // create the first column " " which is always present
+        // create the index column, which is always present. Node labels it
+        // "(iteration index)" for Map/Set and "(index)" otherwise; the width
+        // grows to fit the header name below.
+        let index_column_name = if self.jstype.is_map() || self.jstype.is_set() {
+            "(iteration index)"
+        } else {
+            "(index)"
+        };
         columns.push(Column {
-            name: BunString::static_("\u{0020}"),
+            name: BunString::static_(index_column_name),
             width: 1,
         });
 

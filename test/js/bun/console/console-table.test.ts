@@ -207,13 +207,95 @@ test.skip("console.table character widths", () => {
 });
 
 test("console.table repeat 50", () => {
-  const expected = `┌───┬───┐
-│   │ n │
-├───┼───┤
-│ 0 │ 8 │
-└───┴───┘
+  const expected = `┌─────────┬───┐
+│ (index) │ n │
+├─────────┼───┤
+│ 0       │ 8 │
+└─────────┴───┘
 `;
   for (let i = 0; i < 50; i++) {
     expect(renderTable([{ n: 8 }])).toBe(expected);
   }
+});
+
+// https://github.com/oven-sh/bun/issues/32614
+// Node labels the first column "(index)" ("(iteration index)" for Map/Set) and
+// left-aligns it; Bun left the header blank and right-aligned the column. These
+// drive the real `console.table` / `node:console` path through a subprocess.
+describe("Node compatibility: index column header + alignment", () => {
+  async function run(code: string): Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
+    await using proc = Bun.spawn({
+      cmd: [bunExe(), "-e", code],
+      env: bunEnv,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    return { stdout, stderr, exitCode };
+  }
+
+  test("array of objects: (index) header, left-aligned index column", async () => {
+    const { stdout, exitCode } = await run(`console.table([{ a: 1, b: 'Y' }, { a: 'Z', b: 2 }]);`);
+    expect(stdout).toBe(
+      `┌─────────┬───┬───┐
+│ (index) │ a │ b │
+├─────────┼───┼───┤
+│ 0       │ 1 │ Y │
+│ 1       │ Z │ 2 │
+└─────────┴───┴───┘
+`,
+    );
+    expect(exitCode).toBe(0);
+  });
+
+  test("`table` from node:console matches global console.table", async () => {
+    const input = `[{ a: 1, b: 'Y' }, { a: 'Z', b: 2 }]`;
+    const { stdout: fromImport } = await run(`import { table } from 'node:console'; table(${input});`);
+    const { stdout: fromGlobal } = await run(`console.table(${input});`);
+    expect(fromImport).toBe(fromGlobal);
+    expect(fromImport).toContain("(index)");
+  });
+
+  test("plain object uses (index) header", async () => {
+    const { stdout, exitCode } = await run(`console.table({ a: 42, b: 'bun' });`);
+    expect(stdout).toBe(
+      `┌─────────┬────────┐
+│ (index) │ Values │
+├─────────┼────────┤
+│ a       │ 42     │
+│ b       │ bun    │
+└─────────┴────────┘
+`,
+    );
+    expect(exitCode).toBe(0);
+  });
+
+  test("Map uses (iteration index) header", async () => {
+    const { stdout, exitCode } = await run(`console.table(new Map([['a', 42], ['b', 'bun'], [42, 'c']]));`);
+    expect(stdout).toBe(
+      `┌───────────────────┬─────┬────────┐
+│ (iteration index) │ Key │ Values │
+├───────────────────┼─────┼────────┤
+│ 0                 │ a   │ 42     │
+│ 1                 │ b   │ bun    │
+│ 2                 │ 42  │ c      │
+└───────────────────┴─────┴────────┘
+`,
+    );
+    expect(exitCode).toBe(0);
+  });
+
+  test("Set uses (iteration index) header", async () => {
+    const { stdout, exitCode } = await run(`console.table(new Set([42, 'bun']));`);
+    expect(stdout).toBe(
+      `┌───────────────────┬────────┐
+│ (iteration index) │ Values │
+├───────────────────┼────────┤
+│ 0                 │ 42     │
+│ 1                 │ bun    │
+└───────────────────┴────────┘
+`,
+    );
+    expect(exitCode).toBe(0);
+  });
 });
