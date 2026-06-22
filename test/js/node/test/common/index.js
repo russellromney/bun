@@ -57,6 +57,8 @@ const noop = () => {};
 const hasCrypto = Boolean(process.versions.openssl) &&
                   !process.env.NODE_SKIP_CRYPTO;
 
+const hasSQLite = Boolean(process.versions.sqlite);
+
 // Synthesize OPENSSL_VERSION_NUMBER format with the layout 0xMNN00PPSL
 const opensslVersionNumber = (major = 0, minor = 0, patch = 0) => {
   assert(major >= 0 && major <= 0xf);
@@ -158,6 +160,11 @@ if (process.argv.length === 2 &&
         // node:http2 implementation's own internals.
         installBunExposeInternalsShim();
         break;
+      }
+      if ((flag === "--experimental-sqlite" || flag === "--no-experimental-sqlite") && process.versions.bun) {
+        // node:sqlite is always available in Bun; the Node experimental gate
+        // does not exist, so don't re-spawn just to pass the flag through.
+        continue;
       }
       if (flag === "test") {
         process.env.SKIP_FLAG_CHECK = "1";
@@ -812,6 +819,12 @@ function skipIfWorker() {
   }
 }
 
+function skipIfSQLiteMissing() {
+  if (!hasSQLite) {
+    skip('missing SQLite');
+  }
+}
+
 function getArrayBufferViews(buf) {
   const { buffer, byteOffset, byteLength } = buf;
 
@@ -1081,6 +1094,7 @@ const common = {
   hasCrypto,
   hasOpenSSL,
   hasQuic,
+  hasSQLite,
   hasMultiLocalhost,
   invalidArgTypeHelper,
   isAlive,
@@ -1115,6 +1129,7 @@ const common = {
   skipIfDumbTerminal,
   skipIfEslintMissing,
   skipIfInspectorDisabled,
+  skipIfSQLiteMissing,
   skipIfWorker,
   spawnPromisified,
 
