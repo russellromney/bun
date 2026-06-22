@@ -1,10 +1,11 @@
 'use strict';
 const common = require('../common');
-if (typeof globalThis.Bun !== "undefined") return; // TODO: BUN
 if (!common.hasCrypto)
   common.skip('missing crypto');
 
-if (common.hasOpenSSL3)
+const { hasOpenSSL3 } = require('../common/crypto');
+
+if (hasOpenSSL3)
   // TODO(danbev) This test fails with the following error:
   // error:0D00008F:asn1 encoding routines::no matching choice type
   //
