@@ -16,8 +16,10 @@ use bun_boringssl_sys as ssl;
 use bun_jsc::{CallFrame, JSGlobalObject, JSValue, JsCell, JsRef, JsResult, Strong, StringJsc};
 use bun_ngtcp2_sys as ngtcp2;
 
+use crate::jsc_hooks::timer_all_mut as timer_all;
 use crate::socket::SocketAddress;
 use crate::socket::socket_address::inet;
+use crate::timer::{EventLoopTimer, EventLoopTimerState, EventLoopTimerTag};
 
 use super::callbacks;
 use super::endpoint::QuicEndpoint;
@@ -315,10 +317,19 @@ pub struct QuicSession {
     /// The CID(s) this session is registered under in the endpoint's routing
     /// map, so destroy can unregister them.
     registered_cids: JsCell<Vec<Vec<u8>>>,
+    /// The realm this session was created in (JS-thread only; outlives the
+    /// session).
+    global: Cell<*const JSGlobalObject>,
+    /// Drives ngtcp2's expiry (loss detection, idle/handshake timeouts).
+    /// pub(crate): the timer-fire dispatch recovers the session via
+    /// `from_field_ptr!`, which needs `offset_of!` visibility.
+    pub(crate) event_loop_timer: JsCell<EventLoopTimer>,
     handshake_reported: Cell<bool>,
     close_reported: Cell<bool>,
     destroyed: Cell<bool>,
 }
+
+bun_event_loop::impl_timer_owner!(QuicSession; from_timer_ptr => event_loop_timer);
 
 impl QuicSession {
     fn state_mut(&self) -> *mut SessionState {
@@ -374,6 +385,8 @@ impl QuicSession {
             local_addr: Cell::new(local_addr),
             remote_addr: Cell::new(remote_addr),
             registered_cids: JsCell::new(Vec::new()),
+            global: Cell::new(core::ptr::from_ref(global)),
+            event_loop_timer: JsCell::new(EventLoopTimer::init_paused(EventLoopTimerTag::QuicSession)),
             handshake_reported: Cell::new(false),
             close_reported: Cell::new(false),
             destroyed: Cell::new(false),
@@ -606,6 +619,7 @@ impl QuicSession {
 
         // Send the client initial flight.
         this.flush(global);
+        this.rearm_timer();
 
         Ok(handle)
     }
@@ -767,11 +781,17 @@ impl QuicSession {
             // Non-fatal: ignore the packet.
         }
 
-        self.maybe_report_handshake(global);
+        // Send everything the packet produced (including our final handshake
+        // flight) BEFORE reporting handshake completion: the JS callback runs
+        // user continuations synchronously (e.g. `await opened` → `close()`),
+        // and those must observe a peer that has already received our
+        // handshake data.
+        self.flush(global);
         if self.destroyed.get() {
             return;
         }
-        self.flush(global);
+        self.maybe_report_handshake(global);
+        self.rearm_timer();
     }
 
     /// Run the ngtcp2 write loop, sending every produced packet.
@@ -832,7 +852,62 @@ impl QuicSession {
             self.add_stat(IDX_STATS_PKT_SENT, 1);
             self.add_stat(IDX_STATS_BYTES_SENT, n as u64);
         }
-        self.maybe_report_handshake(global);
+    }
+
+    /// Re-arm (or pause) the expiry timer to ngtcp2's next deadline. Must be
+    /// called after every operation that can change the deadline (reads,
+    /// writes, expiry handling).
+    fn rearm_timer(&self) {
+        let timer = self.event_loop_timer.as_ptr();
+        if self.destroyed.get() || self.conn.get().is_null() {
+            if self.event_loop_timer.get().state == EventLoopTimerState::ACTIVE {
+                timer_all().remove(timer);
+            }
+            return;
+        }
+        // SAFETY: `conn` is live.
+        let expiry = unsafe { ngtcp2::ngtcp2_conn_get_expiry(self.conn.get()) };
+        if expiry == u64::MAX {
+            if self.event_loop_timer.get().state == EventLoopTimerState::ACTIVE {
+                timer_all().remove(timer);
+            }
+            return;
+        }
+        let delta_ms = expiry.saturating_sub(now_ns()).div_ceil(ngtcp2::NGTCP2_MILLISECONDS).max(1) as i64;
+        let next = bun_core::Timespec::ms_from_now(bun_core::TimespecMockMode::ForceRealTime, delta_ms);
+        // SAFETY: `event_loop_timer` is the live inline timer field of this
+        // heap-allocated session.
+        timer_all().update(timer, &next);
+    }
+
+    /// Timer-fire dispatch target: let ngtcp2 handle its expired deadlines
+    /// (loss detection, idle/handshake timeouts), then drive output.
+    pub(crate) fn on_timer_fire(this: *mut Self) {
+        // SAFETY: the timer heap only holds timers of live sessions (teardown
+        // removes the timer before the session can be freed).
+        let this_ref = unsafe { &*this };
+        this_ref
+            .event_loop_timer
+            .with_mut(|t| t.state = EventLoopTimerState::FIRED);
+        if this_ref.destroyed.get() || this_ref.conn.get().is_null() {
+            return;
+        }
+        let global_ptr = this_ref.global.get();
+        if global_ptr.is_null() {
+            return;
+        }
+        // SAFETY: sessions only exist on the JS thread of this realm and the
+        // realm outlives them.
+        let global = unsafe { &*global_ptr };
+        // SAFETY: `conn` is live.
+        let rv = unsafe { ngtcp2::ngtcp2_conn_handle_expiry(this_ref.conn.get(), now_ns()) };
+        if rv != 0 {
+            // Idle timeout, handshake timeout, or another fatal condition.
+            this_ref.close_with_local_error(global, rv);
+            return;
+        }
+        this_ref.flush(global);
+        this_ref.rearm_timer();
     }
 
     /// If the TLS handshake just completed, report it to JS.
@@ -924,10 +999,18 @@ impl QuicSession {
             return;
         }
         let mut ccerr = core::mem::MaybeUninit::<ngtcp2::ngtcp2_ccerr>::zeroed();
-        // SAFETY: default + set_liberr fully initialize the struct.
+        // SAFETY: default + set_liberr/set_tls_alert fully initialize the struct.
         let ccerr = unsafe {
             ngtcp2::ngtcp2_ccerr_default(ccerr.as_mut_ptr());
-            ngtcp2::ngtcp2_ccerr_set_liberr(ccerr.as_mut_ptr(), liberr, null(), 0);
+            if liberr == ngtcp2::NGTCP2_ERR_CRYPTO {
+                // A TLS failure closes the connection with CRYPTO_ERROR +
+                // alert (e.g. 0x178 for no_application_protocol), which is
+                // what the peer (and the JS error code) must observe.
+                let alert = ngtcp2::ngtcp2_conn_get_tls_alert(self.conn.get());
+                ngtcp2::ngtcp2_ccerr_set_tls_alert(ccerr.as_mut_ptr(), alert, null(), 0);
+            } else {
+                ngtcp2::ngtcp2_ccerr_set_liberr(ccerr.as_mut_ptr(), liberr, null(), 0);
+            }
             ccerr.assume_init()
         };
         self.send_connection_close(&ccerr);
@@ -1021,6 +1104,9 @@ impl QuicSession {
     fn teardown(&self, _global: &JSGlobalObject) {
         if self.destroyed.replace(true) {
             return;
+        }
+        if self.event_loop_timer.get().state == EventLoopTimerState::ACTIVE {
+            timer_all().remove(self.event_loop_timer.as_ptr());
         }
         let endpoint = self.endpoint.get();
         if !endpoint.is_null() {

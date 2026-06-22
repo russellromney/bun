@@ -699,6 +699,13 @@ unsafe extern "C" {
         reason: *const u8,
         reasonlen: usize,
     );
+    pub fn ngtcp2_ccerr_set_tls_alert(
+        ccerr: *mut ngtcp2_ccerr,
+        tls_alert: u8,
+        reason: *const u8,
+        reasonlen: usize,
+    );
+    pub fn ngtcp2_conn_get_tls_alert(conn: *mut ngtcp2_conn) -> u8;
 
     pub fn ngtcp2_pkt_decode_version_cid(dest: *mut ngtcp2_version_cid, data: *const u8, datalen: usize, short_dcidlen: usize) -> c_int;
     pub fn ngtcp2_accept(dest: *mut ngtcp2_pkt_hd, pkt: *const u8, pktlen: usize) -> c_int;

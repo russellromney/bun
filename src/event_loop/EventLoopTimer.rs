@@ -203,6 +203,8 @@ pub enum Tag {
     BunTest,
     EventLoopDelayMonitor,
     CronJob,
+    QuicEndpoint,
+    QuicSession,
 }
 
 impl Tag {

@@ -16,8 +16,10 @@ use bun_jsc::{ArrayBuffer, CallFrame, JSGlobalObject, JSType, JSValue, JsCell, J
 use bun_ngtcp2_sys as ngtcp2;
 use bun_uws as uws;
 
+use crate::jsc_hooks::timer_all_mut as timer_all;
 use crate::socket::SocketAddress;
 use crate::socket::socket_address::inet;
+use crate::timer::{EventLoopTimer, EventLoopTimerState, EventLoopTimerTag};
 
 use super::callbacks;
 use super::now_ns;
@@ -127,7 +129,14 @@ pub struct QuicEndpoint {
     global: Cell<*const JSGlobalObject>,
     /// Routes received packets to their session by destination CID.
     sessions: JsCell<HashMap<Vec<u8>, *mut QuicSession>>,
+    /// Defers `onEndpointClose` to a later event-loop turn (Node completes the
+    /// endpoint close asynchronously; JS observes `closing === true` in
+    /// between). pub(crate): the timer-fire dispatch recovers the endpoint via
+    /// `from_field_ptr!`, which needs `offset_of!` visibility.
+    pub(crate) event_loop_timer: JsCell<EventLoopTimer>,
 }
+
+bun_event_loop::impl_timer_owner!(QuicEndpoint; from_timer_ptr => event_loop_timer);
 
 extern "C" fn on_drain(_socket: *mut uws::udp::Socket) {}
 
@@ -275,6 +284,7 @@ impl QuicEndpoint {
             listen_options: JsCell::new(None),
             global: Cell::new(core::ptr::from_ref(global)),
             sessions: JsCell::new(HashMap::new()),
+            event_loop_timer: JsCell::new(EventLoopTimer::init_paused(EventLoopTimerTag::QuicEndpoint)),
         };
         endpoint.write_stat(IDX_STATS_CREATED_AT, now_ns());
 
@@ -613,22 +623,49 @@ impl QuicEndpoint {
             }
             self.write_stat(IDX_STATS_DESTROYED_AT, now_ns());
 
-            // Allow GC of the wrapper again now that the socket is gone.
-            self.this_value.with_mut(|r| r.downgrade());
-
-            // Node invokes onEndpointClose(context, status) with the handle as
-            // `this` once all pending work is done; with no sessions yet that
-            // is immediately.
-            if let Some(callback) = callbacks::get(global, "onEndpointClose") {
-                let vm = global.bun_vm().as_mut();
-                vm.event_loop_ref().run_callback(
-                    callback,
-                    global,
-                    frame.this(),
-                    &[JSValue::js_number(f64::from(CLOSECONTEXT_CLOSE)), JSValue::js_number(0.0)],
-                );
+            // Node completes the close asynchronously: JS observes
+            // `closing === true` after close() returns, and onEndpointClose
+            // arrives on a later event-loop turn. Defer it through the timer;
+            // the wrapper stays strongly held until the callback has run.
+            // (An endpoint that never bound has an empty `this_value` — pin it
+            // here so the deferred callback can reach the handle.)
+            if self.this_value.get().is_empty() {
+                self.this_value.with_mut(|r| r.set_strong(frame.this(), global));
             }
+            let next = bun_core::Timespec::ms_from_now(bun_core::TimespecMockMode::ForceRealTime, 1);
+            // SAFETY: `event_loop_timer` is the live inline timer field of
+            // this heap-allocated endpoint.
+            timer_all().update(self.event_loop_timer.as_ptr(), &next);
         }
         Ok(JSValue::UNDEFINED)
+    }
+
+    /// Timer-fire dispatch target: deliver the deferred `onEndpointClose`.
+    pub(crate) fn on_timer_fire(this: *mut Self) {
+        // SAFETY: the timer heap only holds timers of live endpoints (the
+        // wrapper is strong until this fires; finalize is unreachable before).
+        let this_ref = unsafe { &*this };
+        this_ref
+            .event_loop_timer
+            .with_mut(|t| t.state = EventLoopTimerState::FIRED);
+        let global_ptr = this_ref.global.get();
+        if global_ptr.is_null() {
+            return;
+        }
+        // SAFETY: endpoints only exist on the JS thread of this realm and the
+        // realm outlives them.
+        let global = unsafe { &*global_ptr };
+        let handle = this_ref.this_value.get().get();
+        if let Some(callback) = callbacks::get(global, "onEndpointClose") {
+            let vm = global.bun_vm().as_mut();
+            vm.event_loop_ref().run_callback(
+                callback,
+                global,
+                handle,
+                &[JSValue::js_number(f64::from(CLOSECONTEXT_CLOSE)), JSValue::js_number(0.0)],
+            );
+        }
+        // Allow GC of the wrapper now that the close has been delivered.
+        this_ref.this_value.with_mut(|r| r.downgrade());
     }
 }
