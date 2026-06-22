@@ -26,6 +26,8 @@ use super::endpoint::QuicEndpoint;
 use super::now_ns;
 use super::tls::{TlsConfig, TlsSession};
 
+bun_core::declare_scope!(quic_session, hidden);
+
 /// Mirrors Node's `Session::State` (`SESSION_STATE` in node/src/quic/session.cc).
 /// `IDX_STATE_SESSION_*` binding constants are `offset_of!` values into this.
 #[repr(C)]
@@ -326,6 +328,8 @@ pub struct QuicSession {
     pub(crate) event_loop_timer: JsCell<EventLoopTimer>,
     handshake_reported: Cell<bool>,
     close_reported: Cell<bool>,
+    /// A JS-initiated close waiting to complete on the next timer fire.
+    pending_close: Cell<bool>,
     destroyed: Cell<bool>,
 }
 
@@ -389,6 +393,7 @@ impl QuicSession {
             event_loop_timer: JsCell::new(EventLoopTimer::init_paused(EventLoopTimerTag::QuicSession)),
             handshake_reported: Cell::new(false),
             close_reported: Cell::new(false),
+            pending_close: Cell::new(false),
             destroyed: Cell::new(false),
         };
         let raw = bun_core::heap::into_raw(Box::new(session));
@@ -740,8 +745,11 @@ impl QuicSession {
         if self.destroyed.get() || self.conn.get().is_null() {
             return;
         }
-        // Track the peer's current address (it can change with migration).
-        if remote.is_set() {
+        // Keep the remote address from connect/accept. Path migration is not
+        // implemented, so a differing source address must not redirect our
+        // sends (ngtcp2 validates the path; we keep transmitting to the
+        // address the connection was established with).
+        if remote.is_set() && !self.remote_addr.get().is_set() {
             self.remote_addr.set(remote);
         }
         // The address copies must outlive the read_pkt call: the path only
@@ -767,6 +775,14 @@ impl QuicSession {
         };
         self.add_stat(IDX_STATS_BYTES_RECEIVED, data.len() as u64);
         self.add_stat(IDX_STATS_PKT_RECV, 1);
+        bun_core::scoped_log!(
+            quic_session,
+            "read_pkt {} bytes rv={} completed={}",
+            data.len(),
+            rv,
+            // SAFETY: `conn` is live.
+            unsafe { ngtcp2::ngtcp2_conn_get_handshake_completed(self.conn.get()) }
+        );
 
         if rv != 0 {
             if rv == ngtcp2::NGTCP2_ERR_DRAINING {
@@ -899,6 +915,27 @@ impl QuicSession {
         // SAFETY: sessions only exist on the JS thread of this realm and the
         // realm outlives them.
         let global = unsafe { &*global_ptr };
+
+        // A close requested from JS completes here, one event-loop turn later
+        // (Node's close is asynchronous; completing it inside the JS call
+        // would let the caller's continuations run before the peer ever gets
+        // our final packets).
+        if this_ref.pending_close.replace(false) {
+            // SAFETY: state buffer is live while the wrapper is.
+            let silent = unsafe { (*this_ref.state_mut()).silent_close } != 0;
+            if !silent {
+                let mut ccerr = core::mem::MaybeUninit::<ngtcp2::ngtcp2_ccerr>::zeroed();
+                // SAFETY: ccerr_default fully initializes the struct (NO_ERROR).
+                let ccerr = unsafe {
+                    ngtcp2::ngtcp2_ccerr_default(ccerr.as_mut_ptr());
+                    ccerr.assume_init()
+                };
+                this_ref.send_connection_close(&ccerr);
+            }
+            this_ref.report_close(global, 0, 0, None, None);
+            return;
+        }
+
         // SAFETY: `conn` is live.
         let rv = unsafe { ngtcp2::ngtcp2_conn_handle_expiry(this_ref.conn.get(), now_ns()) };
         if rv != 0 {
@@ -1130,21 +1167,6 @@ impl QuicSession {
         self.this_value.with_mut(|r| r.downgrade());
     }
 
-    /// Endpoint shutdown path: close the wire connection and notify JS.
-    pub(super) fn close_from_endpoint(&self, global: &JSGlobalObject) {
-        if self.destroyed.get() {
-            return;
-        }
-        let mut ccerr = core::mem::MaybeUninit::<ngtcp2::ngtcp2_ccerr>::zeroed();
-        // SAFETY: ccerr_default fully initializes the struct (NO_ERROR).
-        let ccerr = unsafe {
-            ngtcp2::ngtcp2_ccerr_default(ccerr.as_mut_ptr());
-            ccerr.assume_init()
-        };
-        self.send_connection_close(&ccerr);
-        self.report_close(global, 0, 0, None, None);
-    }
-
     pub(crate) fn finalize(self: Box<Self>) {
         // The wrapper is only collectable after teardown (the session holds
         // itself strong while the connection is live), so nothing native is
@@ -1178,25 +1200,35 @@ impl QuicSession {
         Ok(JSValue::UNDEFINED)
     }
 
-    pub(crate) fn graceful_close(&self, global: &JSGlobalObject, _frame: &CallFrame) -> JsResult<JSValue> {
+    /// Schedule the close to complete on the next timer fire.
+    fn schedule_close(&self) {
+        if self.destroyed.get() || self.close_reported.get() || self.pending_close.replace(true) {
+            return;
+        }
+        let next = bun_core::Timespec::ms_from_now(bun_core::TimespecMockMode::ForceRealTime, 1);
+        // SAFETY: `event_loop_timer` is the live inline timer field of this
+        // heap-allocated session.
+        timer_all().update(self.event_loop_timer.as_ptr(), &next);
+    }
+
+    pub(crate) fn graceful_close(&self, _global: &JSGlobalObject, _frame: &CallFrame) -> JsResult<JSValue> {
         if self.destroyed.get() {
             return Ok(JSValue::UNDEFINED);
         }
         // SAFETY: state buffer is live while the wrapper is.
         unsafe { (*self.state_mut()).graceful_close = 1 };
-        // No streams exist yet, so a graceful close completes immediately:
-        // send CONNECTION_CLOSE (NO_ERROR) and notify JS.
-        self.close_from_endpoint(global);
+        // No streams exist yet, so nothing further to wait for.
+        self.schedule_close();
         Ok(JSValue::UNDEFINED)
     }
 
-    pub(crate) fn silent_close(&self, global: &JSGlobalObject, _frame: &CallFrame) -> JsResult<JSValue> {
+    pub(crate) fn silent_close(&self, _global: &JSGlobalObject, _frame: &CallFrame) -> JsResult<JSValue> {
         if self.destroyed.get() {
             return Ok(JSValue::UNDEFINED);
         }
         // SAFETY: state buffer is live while the wrapper is.
         unsafe { (*self.state_mut()).silent_close = 1 };
-        self.report_close(global, 0, 0, None, None);
+        self.schedule_close();
         Ok(JSValue::UNDEFINED)
     }
 

@@ -25,6 +25,8 @@ use super::callbacks;
 use super::now_ns;
 use super::session::{QuicSession, StoredAddr};
 
+bun_core::declare_scope!(quic, hidden);
+
 /// Mirrors Node's `Endpoint::State` (node/src/quic/endpoint.cc `ENDPOINT_STATE`).
 /// The `IDX_STATE_ENDPOINT_*` constants exposed on the binding are
 /// `offset_of!` values into this struct, and `QuicEndpoint.state` is an
@@ -111,6 +113,8 @@ pub struct QuicEndpoint {
     /// Same ownership story as `state`; `ENDPOINT_STATS_FIELDS.len()` u64
     /// slots exposed as the wrapper's `stats` own property.
     stats: *mut u64,
+    /// A graceful close was requested and is waiting for live sessions.
+    closing: Cell<bool>,
     closed: Cell<bool>,
 
     /// The uSockets UDP socket once bound (lazily, on `listen()`).
@@ -276,6 +280,7 @@ impl QuicEndpoint {
         let endpoint = QuicEndpoint {
             state: state_ptr.cast::<EndpointState>(),
             stats: stats_ptr.cast::<u64>(),
+            closing: Cell::new(false),
             closed: Cell::new(false),
             socket: Cell::new(None),
             bind_config: JsCell::new(bind_config),
@@ -403,11 +408,12 @@ impl QuicEndpoint {
             return;
         }
         let socket = uws::udp::Socket::opaque_mut(socket);
-        socket.send(
+        let sent = socket.send(
             &[data.as_ptr()],
             &[data.len()],
             &[dest.as_ptr().cast::<c_void>()],
         );
+        bun_core::scoped_log!(quic, "send {} bytes -> rv {}", data.len(), sent);
         self.add_stat(IDX_STATS_PACKETS_SENT, 1);
         self.add_stat(IDX_STATS_BYTES_SENT, data.len() as u64);
     }
@@ -425,6 +431,10 @@ impl QuicEndpoint {
             map.remove(cid);
         });
         self.update_keepalive();
+        // A graceful endpoint close completes once the last session is gone.
+        if self.closing.get() && !self.closed.get() && self.sessions.get().is_empty() {
+            self.finish_close();
+        }
     }
 
     /// Handle one received UDP datagram: route to the owning session by DCID,
@@ -446,12 +456,22 @@ impl QuicEndpoint {
         };
         if rv != 0 || vc.dcid.is_null() || vc.dcidlen == 0 || vc.dcidlen > ngtcp2::NGTCP2_MAX_CIDLEN {
             // Includes the version-negotiation-required case; dropped for now.
+            bun_core::scoped_log!(quic, "recv {} bytes: undecodable (rv={})", data.len(), rv);
             return;
         }
         // SAFETY: decode_version_cid returned pointers into `data`, in bounds.
         let dcid = unsafe { core::slice::from_raw_parts(vc.dcid, vc.dcidlen) };
 
         let existing = self.sessions.get().get(dcid).copied();
+        bun_core::scoped_log!(
+            quic,
+            "endpoint recv {} bytes dcid={:02x?} routed={} listening={}",
+            data.len(),
+            dcid,
+            existing.is_some(),
+            // SAFETY: see `state` field docs.
+            unsafe { (*self.state_mut()).listening }
+        );
         if let Some(session) = existing {
             // SAFETY: sessions unregister themselves from this map before they
             // are destroyed, so a routed pointer is always live.
@@ -591,53 +611,58 @@ impl QuicEndpoint {
         ))
     }
 
+    /// A graceful close stops accepting new sessions and waits for the live
+    /// ones to finish; the close completes (socket released, onEndpointClose
+    /// delivered) once the last session is gone.
     pub(crate) fn close_gracefully(&self, global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
-        if !self.closed.replace(true) {
-            // Close every live session first (each sends CONNECTION_CLOSE
-            // through the still-open socket and notifies JS, which destroys
-            // the session and unregisters it from the routing map).
-            let live: Vec<*mut QuicSession> = self.sessions.get().values().copied().collect();
-            for session in live {
-                // SAFETY: pointers in the map are live (sessions unregister
-                // before destruction); `close_from_endpoint` is idempotent so
-                // the duplicate entries server sessions register are fine.
-                unsafe { (*session).close_from_endpoint(global) };
-            }
-            self.sessions.with_mut(HashMap::clear);
-
-            if let Some(socket) = self.socket.take() {
-                // Synchronously triggers `on_close`; our handler is a no-op and
-                // the user pointer is still valid here.
-                uws::udp::Socket::opaque_mut(socket).close();
-            }
-            self.poll_ref.with_mut(|p| p.disable());
-            self.listen_options.set(None);
-
-            // SAFETY: see `state` field docs.
-            unsafe {
-                let state = self.state_mut();
-                (*state).closing = 1;
-                (*state).bound = 0;
-                (*state).receiving = 0;
-                (*state).listening = 0;
-            }
-            self.write_stat(IDX_STATS_DESTROYED_AT, now_ns());
-
-            // Node completes the close asynchronously: JS observes
-            // `closing === true` after close() returns, and onEndpointClose
-            // arrives on a later event-loop turn. Defer it through the timer;
-            // the wrapper stays strongly held until the callback has run.
-            // (An endpoint that never bound has an empty `this_value` — pin it
-            // here so the deferred callback can reach the handle.)
-            if self.this_value.get().is_empty() {
-                self.this_value.with_mut(|r| r.set_strong(frame.this(), global));
-            }
-            let next = bun_core::Timespec::ms_from_now(bun_core::TimespecMockMode::ForceRealTime, 1);
-            // SAFETY: `event_loop_timer` is the live inline timer field of
-            // this heap-allocated endpoint.
-            timer_all().update(self.event_loop_timer.as_ptr(), &next);
+        if self.closed.get() || self.closing.get() {
+            return Ok(JSValue::UNDEFINED);
+        }
+        self.closing.set(true);
+        // SAFETY: see `state` field docs.
+        unsafe {
+            (*self.state_mut()).closing = 1;
+            (*self.state_mut()).listening = 0;
+        }
+        // An endpoint that never bound has an empty `this_value` — pin it here
+        // so the deferred onEndpointClose can reach the handle.
+        if self.this_value.get().is_empty() {
+            self.this_value.with_mut(|r| r.set_strong(frame.this(), global));
+        }
+        if self.sessions.get().is_empty() {
+            self.finish_close();
         }
         Ok(JSValue::UNDEFINED)
+    }
+
+    /// Complete a close: release the socket and schedule `onEndpointClose` for
+    /// the next event-loop turn.
+    fn finish_close(&self) {
+        if self.closed.replace(true) {
+            return;
+        }
+        if let Some(socket) = self.socket.take() {
+            // Synchronously triggers `on_close`; our handler is a no-op and
+            // the user pointer is still valid here.
+            uws::udp::Socket::opaque_mut(socket).close();
+        }
+        self.poll_ref.with_mut(|p| p.disable());
+        self.listen_options.set(None);
+
+        // SAFETY: see `state` field docs.
+        unsafe {
+            let state = self.state_mut();
+            (*state).closing = 1;
+            (*state).bound = 0;
+            (*state).receiving = 0;
+            (*state).listening = 0;
+        }
+        self.write_stat(IDX_STATS_DESTROYED_AT, now_ns());
+
+        let next = bun_core::Timespec::ms_from_now(bun_core::TimespecMockMode::ForceRealTime, 1);
+        // SAFETY: `event_loop_timer` is the live inline timer field of this
+        // heap-allocated endpoint.
+        timer_all().update(self.event_loop_timer.as_ptr(), &next);
     }
 
     /// Timer-fire dispatch target: deliver the deferred `onEndpointClose`.
