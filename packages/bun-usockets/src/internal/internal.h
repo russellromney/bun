@@ -71,6 +71,11 @@ void us_internal_loop_update_pending_ready_polls(struct us_loop_t *loop,
 extern void __attribute__((__noreturn__)) Bun__panic(const char *message, size_t length);
 #define BUN_PANIC(message) Bun__panic(message, sizeof(message) - 1)
 
+/* Monotonic clock (ns) used for event-loop-utilization accounting. */
+uint64_t us_loop_monotonic_ns(void);
+/* Sample the loop's accumulated idle time and active time (both ns). */
+void us_loop_event_loop_utilization(struct us_loop_t *loop, uint64_t *idle_ns_out, uint64_t *active_ns_out);
+
 #ifdef _WIN32
 #define IS_EINTR(rc) (rc == SOCKET_ERROR && WSAGetLastError() == WSAEINTR)
 #define LIBUS_ERR WSAGetLastError()

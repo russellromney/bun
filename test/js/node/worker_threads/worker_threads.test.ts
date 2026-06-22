@@ -1,4 +1,4 @@
-import { bunEnv, bunExe, tmpdirSync } from "harness";
+import { bunEnv, bunExe, tempDir, tmpdirSync } from "harness";
 import { once } from "node:events";
 import fs from "node:fs";
 import { join, relative, resolve } from "node:path";
@@ -627,4 +627,37 @@ test("FileHandles nested in Map and Set workerData are transferred", async () =>
   // and Set entries deserialized to the same single instance
   expect(fh.fd).toBe(-1);
   expect(message).toEqual({ sameInstance: true, text: "hello" });
+});
+
+// https://github.com/oven-sh/bun/issues/32609
+test("worker.performance.eventLoopUtilization() reports the worker's activity", async () => {
+  using dir = tempDir("wt-elu", {
+    "worker.mjs": `
+      import { parentPort } from "worker_threads";
+      parentPort.on("message", () => {});
+      // Keep the worker loop busy so active time accumulates.
+      (function busy() {
+        const t = Date.now();
+        while (Date.now() - t < 50);
+        setImmediate(busy);
+      })();
+    `,
+  });
+
+  const worker = new Worker(join(String(dir), "worker.mjs"));
+  try {
+    await new Promise<void>((resolve, reject) => {
+      worker.on("online", () => resolve());
+      worker.on("error", reject);
+    });
+
+    const elu1 = worker.performance.eventLoopUtilization();
+    await Bun.sleep(300);
+    const elu2 = worker.performance.eventLoopUtilization(elu1);
+
+    expect(elu2.active).toBeGreaterThan(50);
+    expect(elu2.utilization).toBeGreaterThan(0.5);
+  } finally {
+    await worker.terminate();
+  }
 });

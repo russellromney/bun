@@ -67,6 +67,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use bun_core::{String as BunString, WTFStringImpl};
 use bun_io::KeepAlive;
 use bun_threading::{Futex, Mutex};
+use bun_uws as uws;
 
 use crate::virtual_machine::{self, VirtualMachine, runtime_hooks};
 use crate::{self as jsc, JSGlobalObject, JSValue, JsError, LogJsc};
@@ -659,6 +660,63 @@ impl WebWorker {
                 poll.unref(bun_io::js_vm_ctx());
             }
         });
+    }
+
+    /// Sample the worker's event-loop idle/active time (milliseconds) from the
+    /// parent thread, backing `worker.performance.eventLoopUtilization()`.
+    ///
+    /// The worker's uws loop lives in its arena; `vm_lock` serialises against
+    /// `shutdown()` nulling `vm` before it frees that arena, so the loop stays
+    /// alive for the duration of the C call. The idle counter that C reads is
+    /// atomic and the loop's creation timestamp is immutable, so no `&VM` /
+    /// `&EventLoop` (which the worker thread would alias) is ever formed.
+    /// Writes zeros before the loop exists or after the worker exits (Node
+    /// returns zeros until the loop starts).
+    ///
+    /// Takes `*mut` for the same reason as `set_ref`: the worker thread
+    /// concurrently dereferences this struct.
+    #[unsafe(export_name = "WebWorker__getEventLoopUtilization")]
+    pub extern "C" fn get_event_loop_utilization(this: *mut WebWorker, idle_ms_out: *mut f64, active_ms_out: *mut f64) {
+        // SAFETY: out-params are valid, writable pointers supplied by C++.
+        unsafe {
+            *idle_ms_out = 0.0;
+            *active_ms_out = 0.0;
+        }
+        // `this` is a valid heap allocation owned by C++ `WebCore::Worker`;
+        // parent-thread only.
+        let this = bun_ptr::ParentRef::from(NonNull::new(this).expect("WebWorker FFI ptr"));
+        this.vm_lock.lock();
+        let vm_ptr = this.vm_ptr();
+        if !vm_ptr.is_null() {
+            // Read the uws loop pointer via raw Copy-field access only.
+            #[cfg(not(windows))]
+            // SAFETY: vm published under vm_lock; `event_loop_handle` is a
+            // Copy `Option<*mut uws::Loop>` set once before the loop runs.
+            let loop_ptr: *mut uws::Loop =
+                unsafe { (*vm_ptr).event_loop_handle }.unwrap_or(core::ptr::null_mut());
+            #[cfg(windows)]
+            // SAFETY: vm published under vm_lock; `event_loop` and `uws_loop`
+            // are Copy fields set once before the loop runs.
+            let loop_ptr: *mut uws::Loop = unsafe {
+                let el = (*vm_ptr).event_loop;
+                if el.is_null() {
+                    core::ptr::null_mut()
+                } else {
+                    (*el).uws_loop.map_or(core::ptr::null_mut(), |p| p.as_ptr())
+                }
+            };
+            if !loop_ptr.is_null() {
+                // SAFETY: the loop is kept alive by the held vm_lock; the C fn
+                // reads the idle counter atomically and an immutable timestamp.
+                let elu = unsafe { uws::loop_event_loop_utilization(loop_ptr) };
+                // SAFETY: out-params validated above.
+                unsafe {
+                    *idle_ms_out = elu.idle_ms;
+                    *active_ms_out = elu.active_ms;
+                }
+            }
+        }
+        this.vm_lock.unlock();
     }
 
     /// worker.terminate() from JS. Sets `requested_terminate`, interrupts

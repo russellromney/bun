@@ -5,7 +5,7 @@ type WebWorker = InstanceType<typeof globalThis.Worker>;
 
 const EventEmitter = require("node:events");
 const Readable = require("internal/streams/readable");
-const { throwNotImplemented, warnNotImplementedOnce } = require("internal/shared");
+const { throwNotImplemented, eventLoopUtilization: computeEventLoopUtilization } = require("internal/shared");
 
 const {
   MessageChannel,
@@ -548,16 +548,15 @@ class Worker extends EventEmitter {
   }
 
   get performance() {
-    return (this.#performance ??= {
-      eventLoopUtilization() {
-        warnNotImplementedOnce("worker_threads.Worker.performance");
-        return {
-          idle: 0,
-          active: 0,
-          utilization: 0,
-        };
-      },
-    });
+    if (this.#performance === undefined) {
+      const getRaw = () => this.#worker.eventLoopUtilization();
+      this.#performance = {
+        eventLoopUtilization(utilization1, utilization2) {
+          return computeEventLoopUtilization(getRaw, utilization1, utilization2);
+        },
+      };
+    }
+    return this.#performance;
   }
 
   terminate(callback: unknown) {

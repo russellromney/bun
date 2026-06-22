@@ -383,6 +383,11 @@ void us_loop_run_bun_tick(struct us_loop_t *loop, const struct timespec* timeout
     if (will_idle_inside_event_loop && loop->data.jsc_vm)
         Bun__JSC_onBeforeWait(loop->data.jsc_vm);
 
+    /* Measure time blocked in the event provider for
+     * performance.eventLoopUtilization(). Only count a real idle wait (non-zero
+     * timeout, no pending wakeups); a zero-timeout poll-through is not idle. */
+    const uint64_t idle_start_ns = will_idle_inside_event_loop ? us_loop_monotonic_ns() : 0;
+
     /* Fetch ready polls */
 #ifdef LIBUS_USE_EPOLL
     /* A zero timespec already has a fast path in ep_poll (fs/eventpoll.c):
@@ -402,6 +407,12 @@ void us_loop_run_bun_tick(struct us_loop_t *loop, const struct timespec* timeout
             timeout);
     } while (IS_EINTR(loop->num_ready_polls));
 #endif
+
+    if (will_idle_inside_event_loop) {
+        const uint64_t idle_end_ns = us_loop_monotonic_ns();
+        if (idle_end_ns > idle_start_ns)
+            __atomic_add_fetch(&loop->data.idle_time_ns, idle_end_ns - idle_start_ns, __ATOMIC_RELAXED);
+    }
 
     us_internal_dispatch_ready_polls(loop);
     us_internal_drain_ready_polls(loop);

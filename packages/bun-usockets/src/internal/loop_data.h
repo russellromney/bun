@@ -80,6 +80,16 @@ struct us_internal_loop_data_t {
      * sockets must be deferred to the outermost tick so the outer dispatch
      * doesn't read a freed poll. */
     int tick_depth;
+    /* Monotonic timestamp (ns) captured when the loop was created; the origin
+     * for event-loop-utilization. Set once in us_internal_loop_data_init. */
+    uint64_t creation_monotonic_ns;
+    /* Accumulated time (ns) the loop spent blocked in the event provider
+     * (epoll_pwait2 / kevent64). Written with __atomic_* by the owning thread
+     * in us_loop_run_bun_tick; read atomically by any thread (the parent reads
+     * a worker's counter for Worker.performance.eventLoopUtilization()). On
+     * Windows the idle time comes from uv_metrics_idle_time() instead, so this
+     * field is left at zero there. */
+    uint64_t idle_time_ns;
 };
 
 #endif // LOOP_DATA_H

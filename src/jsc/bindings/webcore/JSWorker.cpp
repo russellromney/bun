@@ -74,6 +74,7 @@ static JSC_DECLARE_HOST_FUNCTION(jsWorkerPrototypeFunction_postMessage);
 static JSC_DECLARE_HOST_FUNCTION(jsWorkerPrototypeFunction_unref);
 static JSC_DECLARE_HOST_FUNCTION(jsWorkerPrototypeFunction_ref);
 static JSC_DECLARE_HOST_FUNCTION(jsWorkerPrototypeFunction_getHeapSnapshot);
+static JSC_DECLARE_HOST_FUNCTION(jsWorkerPrototypeFunction_eventLoopUtilization);
 
 // Attributes
 
@@ -405,6 +406,7 @@ static const HashTableValue JSWorkerPrototypeTableValues[] = {
     { "threadId"_s, JSC::PropertyAttribute::CustomAccessor | JSC::PropertyAttribute::DOMAttribute | JSC::PropertyAttribute::ReadOnly | JSC::PropertyAttribute::DontDelete, NoIntrinsic, { HashTableValue::GetterSetterType, jsWorker_threadIdGetter, nullptr } },
     { "unref"_s, static_cast<unsigned>(JSC::PropertyAttribute::Function), NoIntrinsic, { HashTableValue::NativeFunctionType, jsWorkerPrototypeFunction_unref, 0 } },
     { "getHeapSnapshot"_s, static_cast<unsigned>(JSC::PropertyAttribute::Function), NoIntrinsic, { HashTableValue::NativeFunctionType, jsWorkerPrototypeFunction_getHeapSnapshot, 0 } },
+    { "eventLoopUtilization"_s, static_cast<unsigned>(JSC::PropertyAttribute::Function), NoIntrinsic, { HashTableValue::NativeFunctionType, jsWorkerPrototypeFunction_eventLoopUtilization, 0 } },
 };
 
 const ClassInfo JSWorkerPrototype::s_info = { "Worker"_s, &Base::s_info, nullptr, nullptr, CREATE_METHOD_TABLE(JSWorkerPrototype) };
@@ -729,6 +731,23 @@ static inline JSC::EncodedJSValue jsWorkerPrototypeFunction_getHeapSnapshotBody(
 JSC_DEFINE_HOST_FUNCTION(jsWorkerPrototypeFunction_getHeapSnapshot, (JSGlobalObject * lexicalGlobalObject, CallFrame* callFrame))
 {
     return IDLOperation<JSWorker>::call<jsWorkerPrototypeFunction_getHeapSnapshotBody>(*lexicalGlobalObject, *callFrame, "getHeapSnapshot");
+}
+
+static inline JSC::EncodedJSValue jsWorkerPrototypeFunction_eventLoopUtilizationBody(JSC::JSGlobalObject* lexicalGlobalObject, JSC::CallFrame* callFrame, typename IDLOperation<JSWorker>::ClassParameter castedThis)
+{
+    auto& vm = JSC::getVM(lexicalGlobalObject);
+    double idleMs = 0;
+    double activeMs = 0;
+    castedThis->wrapped().eventLoopUtilization(idleMs, activeMs);
+    auto* result = JSC::constructEmptyObject(lexicalGlobalObject, lexicalGlobalObject->objectPrototype(), 2);
+    result->putDirect(vm, JSC::Identifier::fromString(vm, "idle"_s), JSC::jsDoubleNumber(idleMs));
+    result->putDirect(vm, JSC::Identifier::fromString(vm, "active"_s), JSC::jsDoubleNumber(activeMs));
+    return JSValue::encode(result);
+}
+
+JSC_DEFINE_HOST_FUNCTION(jsWorkerPrototypeFunction_eventLoopUtilization, (JSGlobalObject * lexicalGlobalObject, CallFrame* callFrame))
+{
+    return IDLOperation<JSWorker>::call<jsWorkerPrototypeFunction_eventLoopUtilizationBody>(*lexicalGlobalObject, *callFrame, "eventLoopUtilization");
 }
 
 JSC::GCClient::IsoSubspace* JSWorker::subspaceForImpl(JSC::VM& vm)

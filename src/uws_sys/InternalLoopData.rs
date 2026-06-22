@@ -55,6 +55,13 @@ pub struct InternalLoopData {
     // Higher tier (`bun_runtime`) casts this back when reading.
     pub jsc_vm: *const c_void,
     pub tick_depth: c_int,
+    /// Monotonic timestamp (ns) when the loop was created; origin for
+    /// event-loop-utilization. Written once by C `us_internal_loop_data_init`.
+    pub creation_monotonic_ns: u64,
+    /// Accumulated ns the loop spent blocked in the event provider, written by
+    /// C with `__atomic_*`. Read via `us_loop_event_loop_utilization`, not
+    /// directly. Zero on Windows (libuv's `uv_metrics_idle_time` is used there).
+    pub idle_time_ns: u64,
 }
 
 impl InternalLoopData {
