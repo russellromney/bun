@@ -24,8 +24,10 @@ const {
     server: any,
     requireHostHeader: boolean,
     useStrictMethodValidation: boolean,
+    insecureHTTPParser: boolean,
     maxHeaderSize: number,
     onClientError: (ssl: boolean, socket: any, errorCode: number, rawPacket: ArrayBuffer) => undefined,
+    onConnection?: (socketHandle: any) => undefined,
   ) => void;
   getCompleteWebRequestOrResponseBodyValueAsArrayBuffer: (arg: any) => ArrayBuffer | undefined;
   drainMicrotasks: () => void;
@@ -88,7 +90,6 @@ const serverSymbol = Symbol.for("::bunternal::");
 const kPendingCallbacks = Symbol("pendingCallbacks");
 const kRequest = Symbol("request");
 const kCloseCallback = Symbol("closeCallback");
-const kDeferredTimeouts = Symbol("deferredTimeouts");
 
 const kEmptyObject = Object.freeze(Object.create(null));
 
@@ -185,8 +186,21 @@ function emitCloseNTAndComplete(self) {
 }
 
 function emitEOFIncomingMessageOuter(self) {
-  self.push(null);
   self.complete = true;
+  // node:http server: trailer fields received after a chunked request body
+  // populate req.trailers/rawTrailers before 'end' is emitted, like Node's
+  // parserOnMessageComplete. The native parser captures them on the
+  // connection's socket handle.
+  if (self[kHandle] !== undefined) {
+    const socketHandle = self.socket?.[kHandle];
+    if (socketHandle != null) {
+      const rawTrailers = socketHandle.takeRequestTrailers();
+      if (rawTrailers !== undefined) {
+        self._addHeaderLines(rawTrailers, rawTrailers.length);
+      }
+    }
+  }
+  self.push(null);
 }
 function emitEOFIncomingMessage(self) {
   self[eofInProgress] = true;
@@ -543,7 +557,6 @@ export {
   kBodyChunks,
   kClearTimeout,
   kCloseCallback,
-  kDeferredTimeouts,
   kDeprecatedReplySymbol,
   kEmitState,
   kEmptyObject,

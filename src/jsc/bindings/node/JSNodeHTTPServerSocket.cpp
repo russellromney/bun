@@ -7,6 +7,7 @@
 #include "helpers.h"
 #include "JSSocketAddressDTO.h"
 #include <JavaScriptCore/JSCJSValueInlines.h>
+#include <JavaScriptCore/ObjectConstructor.h>
 #include <JavaScriptCore/VMTrapsInlines.h>
 #include <wtf/text/WTFString.h>
 #include <bun-uws/src/App.h>
@@ -57,32 +58,188 @@ void JSNodeHTTPServerSocket::clearSocketData(bool upgraded, us_socket_t* socket)
     }
 }
 
+template<bool SSL>
+static void flushPartialResponseBeforeClose(us_socket_t* socket)
+{
+    auto* httpResponseData = reinterpret_cast<uWS::HttpResponseData<SSL>*>(us_socket_ext(socket));
+    // Only flush when an in-flight response wrote part of its body but never
+    // ended: Node has already handed those res.write() bytes to the kernel by
+    // the time destroy() runs, so they reach the client there. Ended
+    // responses (including the synthetic terminator written by abort()) keep
+    // the old behavior of being discarded with the close.
+    if ((httpResponseData->state & uWS::HttpResponseData<SSL>::HTTP_WRITE_CALLED)
+        && !(httpResponseData->state & uWS::HttpResponseData<SSL>::HTTP_END_CALLED)) {
+        reinterpret_cast<uWS::AsyncSocket<SSL>*>(socket)->uncork();
+    }
+}
+
 void JSNodeHTTPServerSocket::close()
 {
     if (socket) {
+        if (!upgraded && !us_socket_is_closed(socket) && !us_socket_is_shut_down(socket)) {
+            if (is_ssl) {
+                flushPartialResponseBeforeClose<true>(socket);
+            } else {
+                flushPartialResponseBeforeClose<false>(socket);
+            }
+        }
         us_socket_close(socket, 0, nullptr);
     }
 }
 
-void JSNodeHTTPServerSocket::upgradeToTunnelMode()
+template<bool SSL>
+static void upgradeToTunnelModeImpl(us_socket_t* socket, bool afterBody)
+{
+    auto* httpResponseData = (uWS::HttpResponseData<SSL>*)us_socket_ext(socket);
+    if (afterBody) {
+        /* The Upgrade request carries a body: keep parsing it as HTTP and only
+         * switch into tunnel mode once the message completes (Node 26 delivers
+         * the body through the request before raw data starts flowing). */
+        httpResponseData->nodeHttpTunnelAfterBody = true;
+    } else {
+        httpResponseData->isConnectRequest = true;
+    }
+}
+
+void JSNodeHTTPServerSocket::upgradeToTunnelMode(bool afterBody)
 {
     if (!socket || us_socket_is_closed(socket)) {
         return;
     }
+    /* Like Node's http server connections (allowHalfOpen: true): the peer
+     * finishing its writable side ends the tunnel's readable side without
+     * tearing the connection down, so the server can still write and decides
+     * itself when to end the socket. */
+    socket->flags.allow_half_open = 1;
     /* Reuse the CONNECT plumbing so the parser stops interpreting subsequent
      * bytes as HTTP and routes them to the ondata callback as opaque data. */
     if (is_ssl) {
-        auto* httpResponseData = (uWS::HttpResponseData<true>*)us_socket_ext(socket);
-        httpResponseData->isConnectRequest = true;
+        upgradeToTunnelModeImpl<true>(socket, afterBody);
     } else {
-        auto* httpResponseData = (uWS::HttpResponseData<false>*)us_socket_ext(socket);
-        httpResponseData->isConnectRequest = true;
+        upgradeToTunnelModeImpl<false>(socket, afterBody);
+    }
+}
+
+template<bool SSL>
+static std::string* requestTrailersFor(us_socket_t* socket)
+{
+    auto* httpResponseData = (uWS::HttpResponseData<SSL>*)us_socket_ext(socket);
+    return &httpResponseData->nodeHttpRequestTrailers;
+}
+
+JSC::JSValue JSNodeHTTPServerSocket::takeRequestTrailers(JSC::JSGlobalObject* globalObject)
+{
+    if (!socket || us_socket_is_closed(socket)) {
+        return JSC::jsUndefined();
+    }
+    std::string* trailers = is_ssl ? requestTrailersFor<true>(socket) : requestTrailersFor<false>(socket);
+    if (trailers->empty()) {
+        return JSC::jsUndefined();
+    }
+
+    auto& vm = globalObject->vm();
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    std::string section = std::move(*trailers);
+    trailers->clear();
+
+    JSC::JSArray* array = JSC::constructEmptyArray(globalObject, nullptr, 0);
+    RETURN_IF_EXCEPTION(scope, {});
+
+    /* The captured section is a sequence of "name: value\r\n" lines followed by
+     * the terminating CRLF; preserve the wire casing of names (req.rawTrailers). */
+    unsigned index = 0;
+    size_t pos = 0;
+    while (pos < section.size()) {
+        size_t lineEnd = section.find("\r\n", pos);
+        if (lineEnd == std::string::npos) {
+            lineEnd = section.size();
+        }
+        std::string_view line(section.data() + pos, lineEnd - pos);
+        pos = lineEnd + 2;
+        if (line.empty()) {
+            break;
+        }
+        size_t colon = line.find(':');
+        if (colon == std::string_view::npos) {
+            continue;
+        }
+        std::string_view name = line.substr(0, colon);
+        std::string_view value = line.substr(colon + 1);
+        while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
+            value.remove_prefix(1);
+        }
+        while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) {
+            value.remove_suffix(1);
+        }
+        array->putDirectIndex(globalObject, index++, JSC::jsString(vm, WTF::String::fromUTF8ReplacingInvalidSequences({ reinterpret_cast<const Latin1Character*>(name.data()), name.size() })));
+        RETURN_IF_EXCEPTION(scope, {});
+        array->putDirectIndex(globalObject, index++, JSC::jsString(vm, WTF::String::fromUTF8ReplacingInvalidSequences({ reinterpret_cast<const Latin1Character*>(value.data()), value.size() })));
+        RETURN_IF_EXCEPTION(scope, {});
+    }
+
+    if (index == 0) {
+        return JSC::jsUndefined();
+    }
+    return array;
+}
+
+template<bool SSL>
+static void setResponseTrailersImpl(us_socket_t* socket, const WTF::CString& trailers)
+{
+    auto* httpResponseData = (uWS::HttpResponseData<SSL>*)us_socket_ext(socket);
+    httpResponseData->nodeHttpResponseTrailers.assign(trailers.data(), trailers.length());
+}
+
+void JSNodeHTTPServerSocket::setResponseTrailers(WTF::StringView trailers)
+{
+    if (!socket || us_socket_is_closed(socket) || trailers.isEmpty()) {
+        return;
+    }
+    WTF::CString utf8 = trailers.utf8();
+    if (is_ssl) {
+        setResponseTrailersImpl<true>(socket, utf8);
+    } else {
+        setResponseTrailersImpl<false>(socket, utf8);
     }
 }
 
 bool JSNodeHTTPServerSocket::isClosed() const
 {
     return !socket || us_socket_is_closed(socket);
+}
+
+template<bool SSL>
+static bool isRequestTimedOutImpl(us_socket_t* socket, uint64_t headersTimeoutMs, uint64_t requestTimeoutMs)
+{
+    auto* httpResponseData = reinterpret_cast<uWS::HttpResponseData<SSL>*>(us_socket_ext(socket));
+    if (httpResponseData->isConnectRequest) {
+        // CONNECT/Upgrade tunnels are detached from the HTTP request machinery,
+        // like Node freeing the parser for upgraded connections.
+        return false;
+    }
+    uint64_t start = httpResponseData->lastMessageStartMs;
+    if (start == 0) {
+        // Idle: no request message is currently being received.
+        return false;
+    }
+    uint64_t now = uWS::nodeCompatMonotonicMs();
+    uint64_t elapsed = now > start ? now - start : 0;
+    if (headersTimeoutMs > 0 && !httpResponseData->headersCompleted && elapsed > headersTimeoutMs) {
+        return true;
+    }
+    return requestTimeoutMs > 0 && elapsed > requestTimeoutMs;
+}
+
+bool JSNodeHTTPServerSocket::isRequestTimedOut(uint64_t headersTimeoutMs, uint64_t requestTimeoutMs) const
+{
+    if (!socket || upgraded || us_socket_is_closed(socket)) {
+        return false;
+    }
+    if (is_ssl) {
+        return isRequestTimedOutImpl<true>(socket, headersTimeoutMs, requestTimeoutMs);
+    }
+    return isRequestTimedOutImpl<false>(socket, headersTimeoutMs, requestTimeoutMs);
 }
 
 bool JSNodeHTTPServerSocket::isAuthorized() const
@@ -115,6 +272,22 @@ bool JSNodeHTTPServerSocket::isAuthorized() const
     return us_socket_is_ssl_handshake_finished(socket);
 }
 
+const char* JSNodeHTTPServerSocket::sniServername() const
+{
+    if (!is_ssl || !socket) {
+        return nullptr;
+    }
+    return us_socket_sni_servername(socket);
+}
+
+const char* JSNodeHTTPServerSocket::peerCertificateVerificationError() const
+{
+    if (!is_ssl || !socket) {
+        return nullptr;
+    }
+    return us_socket_verify_error(socket).code;
+}
+
 JSNodeHTTPServerSocket::~JSNodeHTTPServerSocket()
 {
     if (socket) {
@@ -139,7 +312,109 @@ void JSNodeHTTPServerSocket::detach()
 {
     this->m_duplex.clear();
     this->currentResponseObject.clear();
+    {
+        Locker locker { m_pipelinedResponsesLock };
+        this->m_pipelinedResponses.clear();
+    }
     this->strongThis.clear();
+}
+
+void JSNodeHTTPServerSocket::appendPipelinedResponse(JSC::VM& vm, WebCore::JSNodeHTTPResponse* response)
+{
+    Locker locker { m_pipelinedResponsesLock };
+    m_pipelinedResponses.append(JSC::WriteBarrier<WebCore::JSNodeHTTPResponse> {});
+    m_pipelinedResponses.last().set(vm, this, response);
+}
+
+template<bool SSL>
+static bool startPipelinedResponseImpl(us_socket_t* socket, bool isAncient, bool connectionClose, bool hasMoreQueued)
+{
+    auto* httpResponseData = reinterpret_cast<uWS::HttpResponseData<SSL>*>(us_socket_ext(socket));
+
+    // The previous response on this connection has finished; this queued
+    // response now owns the per-response state the request handler normally
+    // resets per parsed request.
+    httpResponseData->offset = 0;
+    httpResponseData->state = uWS::HttpResponseData<SSL>::HTTP_RESPONSE_PENDING;
+    if (connectionClose) {
+        httpResponseData->state |= uWS::HttpResponseData<SSL>::HTTP_CONNECTION_CLOSE;
+    }
+    httpResponseData->fromAncientRequest = isAncient;
+    httpResponseData->noBodyStatus = false;
+    httpResponseData->closeDelimited = false;
+    httpResponseData->nodeHttpResponseTrailers.clear();
+
+    if (httpResponseData->nodeHttpQueuedPipelinedCount > 0) {
+        httpResponseData->nodeHttpQueuedPipelinedCount--;
+    }
+    if (!hasMoreQueued && httpResponseData->nodeHttpQueuedPipelinedCount == 0 && httpResponseData->nodeHttpReadsPaused) {
+        // The pipeline backlog drained. Resume reading new requests only once
+        // the socket has no outgoing backpressure left (Node's flood
+        // prevention keeps the socket paused while responses back up);
+        // otherwise HttpContext::onWritable resumes after the drain.
+        if (reinterpret_cast<uWS::AsyncSocket<SSL>*>(socket)->getBufferedAmount() == 0) {
+            httpResponseData->nodeHttpReadsPaused = false;
+            reinterpret_cast<uWS::HttpResponse<SSL>*>(socket)->resume();
+        }
+    }
+    return true;
+}
+
+bool JSNodeHTTPServerSocket::startPipelinedResponse(JSC::VM& vm, WebCore::JSNodeHTTPResponse* response, bool isAncient, bool connectionClose)
+{
+    if (!socket || upgraded || us_socket_is_closed(socket)) {
+        return false;
+    }
+
+    bool hasMoreQueued = false;
+    {
+        Locker locker { m_pipelinedResponsesLock };
+        m_pipelinedResponses.removeFirstMatching([&](auto& entry) { return entry.get() == response; });
+        hasMoreQueued = !m_pipelinedResponses.isEmpty();
+    }
+
+    bool ok;
+    if (is_ssl) {
+        ok = startPipelinedResponseImpl<true>(socket, isAncient, connectionClose, hasMoreQueued);
+    } else {
+        ok = startPipelinedResponseImpl<false>(socket, isAncient, connectionClose, hasMoreQueued);
+    }
+    if (ok) {
+        currentResponseObject.set(vm, this, response);
+    }
+    return ok;
+}
+
+void JSNodeHTTPServerSocket::stopHTTPParsing()
+{
+    if (!socket || upgraded || us_socket_is_closed(socket)) {
+        return;
+    }
+    if (is_ssl) {
+        reinterpret_cast<uWS::HttpResponseData<true>*>(us_socket_ext(socket))->nodeHttpParsingStopped = true;
+    } else {
+        reinterpret_cast<uWS::HttpResponseData<false>*>(us_socket_ext(socket))->nodeHttpParsingStopped = true;
+    }
+}
+
+// Notify the current response and every queued pipelined response that the
+// connection is gone. Called from the close paths below; takes the queued
+// list so a re-entrant close cannot deliver the notification twice.
+static void notifyResponsesOnClose(JSNodeHTTPServerSocket* socket)
+{
+    if (auto* res = socket->currentResponseObject.get(); res != nullptr && res->m_ctx != nullptr) {
+        Bun__NodeHTTPResponse_onClose(res->m_ctx, JSValue::encode(res));
+    }
+    WTF::Vector<JSC::WriteBarrier<WebCore::JSNodeHTTPResponse>, 2> pipelined;
+    {
+        Locker locker { socket->m_pipelinedResponsesLock };
+        pipelined = std::exchange(socket->m_pipelinedResponses, {});
+    }
+    for (auto& entry : pipelined) {
+        if (auto* res = entry.get(); res != nullptr && res->m_ctx != nullptr) {
+            Bun__NodeHTTPResponse_onClose(res->m_ctx, JSValue::encode(res));
+        }
+    }
 }
 
 void JSNodeHTTPServerSocket::onClose()
@@ -148,13 +423,19 @@ void JSNodeHTTPServerSocket::onClose()
     if (auto* res = this->currentResponseObject.get(); res != nullptr && res->m_ctx != nullptr) {
         Bun__NodeHTTPResponse_setClosed(res->m_ctx);
     }
+    {
+        Locker locker { m_pipelinedResponsesLock };
+        for (auto& entry : m_pipelinedResponses) {
+            if (auto* res = entry.get(); res != nullptr && res->m_ctx != nullptr) {
+                Bun__NodeHTTPResponse_setClosed(res->m_ctx);
+            }
+        }
+    }
 
     // This function can be called during GC!
     Zig::GlobalObject* globalObject = static_cast<Zig::GlobalObject*>(this->globalObject());
     if (!functionToCallOnClose) {
-        if (auto* res = this->currentResponseObject.get(); res != nullptr && res->m_ctx != nullptr) {
-            Bun__NodeHTTPResponse_onClose(res->m_ctx, JSValue::encode(res));
-        }
+        notifyResponsesOnClose(this);
         this->detach();
         return;
     }
@@ -162,9 +443,7 @@ void JSNodeHTTPServerSocket::onClose()
     WebCore::ScriptExecutionContext* scriptExecutionContext = globalObject->scriptExecutionContext();
 
     if (!scriptExecutionContext || globalObject->isShuttingDown()) {
-        if (auto* res = this->currentResponseObject.get(); res != nullptr && res->m_ctx != nullptr) {
-            Bun__NodeHTTPResponse_onClose(res->m_ctx, JSValue::encode(res));
-        }
+        notifyResponsesOnClose(this);
         this->detach();
         return;
     }
@@ -175,9 +454,7 @@ void JSNodeHTTPServerSocket::onClose()
         auto* thisObject = self;
         auto* callbackObject = thisObject->functionToCallOnClose.get();
         if (!callbackObject) {
-            if (auto* res = thisObject->currentResponseObject.get(); res != nullptr && res->m_ctx != nullptr) {
-                Bun__NodeHTTPResponse_onClose(res->m_ctx, JSValue::encode(res));
-            }
+            notifyResponsesOnClose(thisObject);
             thisObject->detach();
             return;
         }
@@ -186,9 +463,7 @@ void JSNodeHTTPServerSocket::onClose()
         EnsureStillAliveScope ensureStillAlive(self);
 
         if (globalObject->scriptExecutionStatus(globalObject, thisObject) == ScriptExecutionStatus::Running) {
-            if (auto* res = thisObject->currentResponseObject.get(); res != nullptr && res->m_ctx != nullptr) {
-                Bun__NodeHTTPResponse_onClose(res->m_ctx, JSValue::encode(res));
-            }
+            notifyResponsesOnClose(thisObject);
 
             profiledCall(globalObject, JSC::ProfilingReason::API, callbackObject, callData, thisObject, args, exception);
 
@@ -328,6 +603,12 @@ void JSNodeHTTPServerSocket::visitChildrenImpl(JSCell* cell, Visitor& visitor)
     visitor.append(fn->m_remoteAddress);
     visitor.append(fn->m_localAddress);
     visitor.append(fn->m_duplex);
+    {
+        Locker locker { fn->m_pipelinedResponsesLock };
+        for (auto& entry : fn->m_pipelinedResponses) {
+            visitor.append(entry);
+        }
+    }
 }
 
 DEFINE_VISIT_CHILDREN(JSNodeHTTPServerSocket);
@@ -365,7 +646,10 @@ extern "C" JSC::EncodedJSValue Bun__getNodeHTTPServerSocketThisValue(bool is_ssl
     return JSValue::encode(getNodeHTTPServerSocket<false>(socket));
 }
 
-extern "C" JSC::EncodedJSValue Bun__createNodeHTTPServerSocketForClientError(bool isSSL, us_socket_t* us_socket, Zig::GlobalObject* globalObject)
+// Returns the JSNodeHTTPServerSocket already attached to this raw socket, or
+// creates (and attaches) one. Used for connections that have not produced a
+// parsed request yet: the 'clientError' path and the connection-accept path.
+extern "C" JSC::EncodedJSValue Bun__getOrCreateNodeHTTPServerSocket(bool isSSL, us_socket_t* us_socket, Zig::GlobalObject* globalObject)
 {
     auto& vm = globalObject->vm();
     auto scope = DECLARE_THROW_SCOPE(vm);

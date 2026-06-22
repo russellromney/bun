@@ -786,8 +786,11 @@ it("should trigger error when aborted even if connection failed #13126", async (
   socket.on("connect", reject);
   socket.on("error", resolve);
 
-  const err = (await promise) as Error;
-  expect(err.name).toBe("TimeoutError");
+  // Node destroys the socket with an AbortError carrying the signal's reason as `cause`.
+  const err = (await promise) as Error & { code?: string; cause?: Error };
+  expect(err.name).toBe("AbortError");
+  expect(err.code).toBe("ABORT_ERR");
+  expect(err.cause?.name).toBe("TimeoutError");
 });
 
 it("should trigger error when aborted even if connection failed, and the signal is already aborted #13126", async () => {
@@ -803,8 +806,11 @@ it("should trigger error when aborted even if connection failed, and the signal 
   socket.on("connect", reject);
   socket.on("error", resolve);
 
-  const err = (await promise) as Error;
-  expect(err.name).toBe("TimeoutError");
+  // Node destroys the socket with an AbortError carrying the signal's reason as `cause`.
+  const err = (await promise) as Error & { code?: string; cause?: Error };
+  expect(err.name).toBe("AbortError");
+  expect(err.code).toBe("ABORT_ERR");
+  expect(err.cause?.name).toBe("TimeoutError");
 });
 
 it.if(isWindows)(

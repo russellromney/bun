@@ -35,6 +35,8 @@ describe("TLSSocket.isSessionReused", () => {
         host: "127.0.0.1",
         rejectUnauthorized: false,
       });
+      // Drain the server's "hello" so the readable side can end and 'close' fires.
+      socket.resume();
 
       await new Promise<void>(resolve => socket.on("secureConnect", resolve));
 
@@ -70,6 +72,8 @@ describe("TLSSocket.isSessionReused", () => {
         host: "127.0.0.1",
         rejectUnauthorized: false,
       });
+      // Drain the server's "hello" so the readable side can end and 'close' fires.
+      socket1.resume();
 
       await new Promise<void>(resolve => socket1.on("secureConnect", resolve));
 
@@ -89,6 +93,8 @@ describe("TLSSocket.isSessionReused", () => {
         rejectUnauthorized: false,
         session: session,
       });
+      // Drain the server's "hello" so the readable side can end and 'close' fires.
+      socket2.resume();
 
       await new Promise<void>(resolve => socket2.on("secureConnect", resolve));
 

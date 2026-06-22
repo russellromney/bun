@@ -172,9 +172,12 @@ function detachSocket(self) {
 function destroyNT(self, err) {
   self.destroy(err);
 }
+let addAbortListener;
 function destroyWhenAborted(err) {
   if (!this.destroyed) {
-    this.destroy(err.target.reason);
+    // node's stream layer (addAbortSignal) destroys the socket with an AbortError (code
+    // ABORT_ERR) carrying the signal's reason as `cause`, not with the raw reason itself.
+    this.destroy($makeAbortError(undefined, { cause: err?.target?.reason }));
   }
 }
 // in node's code this callback is called 'onReadableStreamEnd' but that seemed confusing when `ReadableStream`s now exist
@@ -1043,11 +1046,38 @@ const SocketHandlers2: SocketHandler<NonNullable<import("node:net").Socket["_han
   end(socket) {
     $debug("Bun.Socket end");
     const { self } = socket.data;
-    if (self[kended]) return;
+    if (self[kended]) {
+      // A second EOF dispatch on a half-open socket only happens when the transport reports the
+      // connection fully gone (EPOLLHUP after a peer reset): the FIN was already delivered, the
+      // poll is read-disabled, and the kernel-side connection no longer exists. Node surfaces this
+      // as a read/write error (ECONNRESET / EPIPE) the next time the socket is touched; the native
+      // layer here never fails a write, so surface the reset now and release the dead handle
+      // (test-http2-max-invalid-frames / test-http2-reset-flood rely on the client erroring).
+      if (!self.destroyed) {
+        if (self.listenerCount("error") > 0) {
+          const er = new ConnResetException("read ECONNRESET") as Error & { errno?: number; syscall?: string };
+          er.errno = process.platform === "win32" ? -4077 : process.platform === "linux" ? -104 : -54;
+          er.syscall = "read";
+          self.destroy(er);
+        } else {
+          self.destroy();
+        }
+      }
+      return;
+    }
     self[kended] = true;
     if (!self.allowHalfOpen) self.write = writeAfterFIN;
     self.push(null);
     self.read(0);
+    // The peer's FIN means kernel reads are over for good. In libuv a stream handle only holds
+    // the loop while reading or with a write in flight, so node lets the process exit even if
+    // the (half-open) writable side stays open and the readable side was never consumed. Mirror
+    // that: drop this handle's hold on the loop unless a write is still waiting on drain, and
+    // forget any pause()-time unref so a later read()/resume() does not pin the loop again.
+    if (socket === self._handle && !self[kwriteCallback]) {
+      socket.unref?.();
+      self[kPausedUnref] = false;
+    }
   },
   // See SocketHandlers.session.
   session(socket, session) {
@@ -1336,6 +1366,9 @@ function Socket(options?) {
   this._port = undefined;
   this[bunTLSConnectOptions] = null;
   this.timeout = 0;
+  // node initializes the timer slot to null so it is observable before setTimeout() is called.
+  // https://github.com/nodejs/node/blob/v26.3.0/lib/net.js#L401
+  this[kTimeout] = null;
   this[kwriteCallback] = undefined;
   this._pendingData = undefined;
   this._pendingEncoding = undefined; // for compatibility
@@ -1422,9 +1455,13 @@ function Socket(options?) {
   }
   if (signal) {
     if (signal.aborted) {
-      process.nextTick(destroyNT, this, signal.reason);
+      process.nextTick(destroyNT, this, $makeAbortError(undefined, { cause: signal.reason }));
     } else {
-      signal.addEventListener("abort", destroyWhenAborted.bind(this));
+      // addAbortListener registers a once listener; the close hook detaches it when the socket
+      // goes away first (mirrors node's addAbortSignal + eos cleanup).
+      addAbortListener ??= require("internal/abort_listener").addAbortListener;
+      const disposable = addAbortListener(signal, destroyWhenAborted.bind(this));
+      this.once("close", disposable[Symbol.dispose]);
     }
   }
   const optsBlockList = opts.blockList;
@@ -1568,10 +1605,13 @@ Socket.prototype.connect = function connect(...args) {
     } else {
       process.nextTick(() => {
         // Honor pause()/resume() calls made while connecting — only start
-        // flowing if the user hasn't explicitly paused the stream. Matches
+        // reading if the user hasn't explicitly paused the stream. Matches
         // Node's afterConnect, which calls socket.read(0) only when not paused:
         // https://github.com/nodejs/node/blob/843dc5f0d5ad/lib/net.js#L1649
-        if (!this.isPaused()) this.resume();
+        // read(0) starts the handle reading without switching the stream into
+        // flowing mode, so data that arrives before a 'data' listener is
+        // attached stays buffered instead of being emitted to nobody.
+        if (!this.isPaused()) this.read(0);
       });
       this.connecting = true;
     }
@@ -3639,11 +3679,15 @@ function initSocketHandle(self) {
   }
 }
 
+// Node's handle.close(callback) takes a completion callback; userland code
+// intercepts close on `socket._handle` and invokes it, so always pass one.
+function onSocketHandleClosed() {}
+
 function closeSocketHandle(self, isException, isCleanupPending = false) {
   const handle = self._handle;
   $debug("closeSocketHandle", isException, isCleanupPending, !!handle);
   if (handle) {
-    handle.close();
+    handle.close(onSocketHandleClosed);
     setImmediate(() => {
       $debug("emit close", isCleanupPending);
       self.emit("close", isException);
