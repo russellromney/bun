@@ -250,10 +250,14 @@ describe("Node compatibility: index column header + alignment", () => {
 
   test("`table` from node:console matches global console.table", async () => {
     const input = `[{ a: 1, b: 'Y' }, { a: 'Z', b: 2 }]`;
-    const { stdout: fromImport } = await run(`import { table } from 'node:console'; table(${input});`);
-    const { stdout: fromGlobal } = await run(`console.table(${input});`);
+    const { stdout: fromImport, exitCode: importExitCode } = await run(
+      `import { table } from 'node:console'; table(${input});`,
+    );
+    const { stdout: fromGlobal, exitCode: globalExitCode } = await run(`console.table(${input});`);
     expect(fromImport).toBe(fromGlobal);
     expect(fromImport).toContain("(index)");
+    expect(importExitCode).toBe(0);
+    expect(globalExitCode).toBe(0);
   });
 
   test("plain object uses (index) header", async () => {
