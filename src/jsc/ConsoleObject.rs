@@ -941,8 +941,11 @@ impl<'a> TablePrinter<'a> {
 
         // create the index column, which is always present. Node labels it
         // "(iteration index)" for Map/Set and "(index)" otherwise; the width
-        // grows to fit the header name below.
-        let index_column_name = if self.jstype.is_map() || self.jstype.is_set() {
+        // grows to fit the header name below. Match only real Map/Set: Node's
+        // isMap/isSet brand checks exclude WeakMap/WeakSet (they are not
+        // iterable and print as plain objects with the "(index)" header).
+        let is_map = self.jstype == jsc::JSType::Map;
+        let index_column_name = if is_map || self.jstype == jsc::JSType::Set {
             "(iteration index)"
         } else {
             "(index)"
@@ -953,7 +956,7 @@ impl<'a> TablePrinter<'a> {
         });
 
         // special case for Map: create the special "Key" column at index 1
-        if self.jstype.is_map() {
+        if is_map {
             columns.push(Column {
                 name: BunString::static_("Key"),
                 width: 1,

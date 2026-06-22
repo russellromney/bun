@@ -222,7 +222,7 @@ test("console.table repeat 50", () => {
 // Node labels the first column "(index)" ("(iteration index)" for Map/Set) and
 // left-aligns it; Bun left the header blank and right-aligned the column. These
 // drive the real `console.table` / `node:console` path through a subprocess.
-describe("Node compatibility: index column header + alignment", () => {
+describe.concurrent("Node compatibility: index column header + alignment", () => {
   async function run(code: string): Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
     await using proc = Bun.spawn({
       cmd: [bunExe(), "-e", code],
@@ -298,6 +298,23 @@ describe("Node compatibility: index column header + alignment", () => {
 │ 0                 │ 42     │
 │ 1                 │ bun    │
 └───────────────────┴────────┘
+`,
+    );
+    expect(exitCode).toBe(0);
+  });
+
+  // WeakMap/WeakSet are not iterable, so Node renders them as plain objects
+  // with the "(index)" header (not "(iteration index)", and no "Key" column).
+  test.each([
+    ["WeakMap", "new WeakMap()"],
+    ["WeakSet", "new WeakSet()"],
+  ])("%s uses (index) header like a plain object", async (_label, expr) => {
+    const { stdout, exitCode } = await run(`console.table(${expr});`);
+    expect(stdout).toBe(
+      `┌─────────┐
+│ (index) │
+├─────────┤
+└─────────┘
 `,
     );
     expect(exitCode).toBe(0);
