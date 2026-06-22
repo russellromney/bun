@@ -693,6 +693,12 @@ unsafe extern "C" {
         reason: *const u8,
         reasonlen: usize,
     );
+    pub fn ngtcp2_ccerr_set_liberr(
+        ccerr: *mut ngtcp2_ccerr,
+        liberr: c_int,
+        reason: *const u8,
+        reasonlen: usize,
+    );
 
     pub fn ngtcp2_pkt_decode_version_cid(dest: *mut ngtcp2_version_cid, data: *const u8, datalen: usize, short_dcidlen: usize) -> c_int;
     pub fn ngtcp2_accept(dest: *mut ngtcp2_pkt_hd, pkt: *const u8, pktlen: usize) -> c_int;
@@ -767,6 +773,7 @@ unsafe extern "C" {
         ts: ngtcp2_tstamp,
     ) -> ngtcp2_ssize;
 
+    pub fn ngtcp2_conn_get_ccerr(conn: *mut ngtcp2_conn) -> *const ngtcp2_ccerr;
     pub fn ngtcp2_conn_get_expiry(conn: *mut ngtcp2_conn) -> ngtcp2_tstamp;
     pub fn ngtcp2_conn_handle_expiry(conn: *mut ngtcp2_conn, ts: ngtcp2_tstamp) -> c_int;
     pub fn ngtcp2_conn_get_handshake_completed(conn: *mut ngtcp2_conn) -> c_int;

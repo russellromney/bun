@@ -28,7 +28,7 @@ pub struct StreamState {
 }
 
 /// Node's `STREAM_STATS` field names, in declaration order.
-pub(super) const STREAM_STATS_FIELDS: &[&str] = &[
+pub(crate) const STREAM_STATS_FIELDS: &[&str] = &[
     "CREATED_AT",
     "OPENED_AT",
     "RECEIVED_AT",

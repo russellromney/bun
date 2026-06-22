@@ -864,5 +864,9 @@ unsafe extern "C" {
 
     pub fn X509_verify_cert_error_string(err: c_long) -> *const c_char;
 
+    pub fn X509_STORE_new() -> *mut X509_STORE;
+    pub fn X509_STORE_free(store: *mut X509_STORE);
+    pub fn X509_STORE_add_cert(store: *mut X509_STORE, x509: *mut X509) -> c_int;
+
     pub fn RAND_bytes(buf: *mut u8, len: usize) -> c_int;
 }

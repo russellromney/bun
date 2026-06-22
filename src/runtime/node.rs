@@ -129,6 +129,9 @@ pub mod node_cluster_binding;
 #[path = "node/node_net_binding.rs"]
 pub mod node_net_binding;
 
+#[path = "node/node_quic_binding.rs"]
+pub mod node_quic_binding;
+
 #[path = "node/quic/mod.rs"]
 pub mod quic;
 

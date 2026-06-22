@@ -1674,6 +1674,7 @@ dependencies = [
  "bun_libuv_sys",
  "bun_lolhtml_sys",
  "bun_md",
+ "bun_ngtcp2_sys",
  "bun_opaque",
  "bun_options_types",
  "bun_output",
