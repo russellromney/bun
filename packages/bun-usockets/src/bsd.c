@@ -1473,6 +1473,19 @@ void bsd_apply_udp_recv_options(LIBUS_SOCKET_DESCRIPTOR fd, int family) {
  * non-blocking + the shared receive-path options. Returns 0 on success or -1 with
  * the error in errno (WSAGetLastError on Windows). */
 int bsd_prepare_adopted_udp_socket(LIBUS_SOCKET_DESCRIPTOR fd) {
+    /* Refuse to adopt anything that isn't a datagram socket. */
+    int sock_type = 0;
+    socklen_t type_len = sizeof(sock_type);
+    if (getsockopt(fd, SOL_SOCKET, SO_TYPE, (char *) &sock_type, (socklen_t *) &type_len)) {
+        return -1;
+    }
+    if (sock_type != SOCK_DGRAM) {
+#ifdef _WIN32
+        WSASetLastError(WSAEINVAL);
+#endif
+        errno = EINVAL;
+        return -1;
+    }
     struct sockaddr_storage ss;
     socklen_t len = sizeof(ss);
     if (getsockname(fd, (struct sockaddr *) &ss, (socklen_t *) &len)) {
