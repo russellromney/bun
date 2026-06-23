@@ -28,30 +28,48 @@ function uvErrno(err, fallback) {
 // internalBinding('udp_wrap').UDP. Adopting a wrap's fd into a reading socket
 // transfers ownership of the descriptor — don't close the wrap afterwards.
 class UDP {
-  fd = -1;
+  // The descriptor is only reachable through open()/bind()/close() so a stray
+  // write can't redirect close() at an unrelated descriptor.
+  #fd = -1;
+
+  get fd() {
+    return this.#fd;
+  }
 
   bind(address, port, flags) {
-    return bindWrap(this, address, port, flags, false);
+    return this.#bind(address, port, flags, false);
   }
 
   bind6(address, port, flags) {
-    return bindWrap(this, address, port, flags, true);
+    return this.#bind(address, port, flags, true);
+  }
+
+  #bind(address, port, flags, ipv6) {
+    try {
+      if (this.#fd < 0) {
+        this.#fd = newSocketFd(ipv6, false);
+      }
+      bindFd(this.#fd, address || (ipv6 ? "::" : "0.0.0.0"), port || 0, flags || 0);
+      return 0;
+    } catch (err) {
+      return uvErrno(err, UV_EINVAL);
+    }
   }
 
   open(fd) {
-    if (guessHandleTypeFd(fd) !== "UDP") {
+    if (guessHandleType(fd) !== "UDP") {
       return UV_EINVAL;
     }
-    this.fd = fd;
+    this.#fd = fd;
     return 0;
   }
 
   getsockname(out) {
-    if (this.fd < 0) {
+    if (this.#fd < 0) {
       return UV_EBADF;
     }
     try {
-      const { address, port, family } = getSockNameFd(this.fd);
+      const { address, port, family } = getSockNameFd(this.#fd);
       out.address = address;
       out.port = port;
       out.family = family;
@@ -62,9 +80,9 @@ class UDP {
   }
 
   close() {
-    if (this.fd >= 0) {
-      closeFd(this.fd);
-      this.fd = -1;
+    if (this.#fd >= 0) {
+      closeFd(this.#fd);
+      this.#fd = -1;
     }
     return 0;
   }
@@ -73,18 +91,6 @@ class UDP {
   unref() {}
   hasRef() {
     return true;
-  }
-}
-
-function bindWrap(handle, address, port, flags, ipv6) {
-  try {
-    if (handle.fd < 0) {
-      handle.fd = newSocketFd(ipv6, false);
-    }
-    bindFd(handle.fd, address || (ipv6 ? "::" : "0.0.0.0"), port || 0, flags || 0);
-    return 0;
-  } catch (err) {
-    return uvErrno(err, UV_EINVAL);
   }
 }
 
@@ -97,7 +103,7 @@ function _createSocketHandle(address, port, addressType, fd, flags) {
   let err;
 
   if (typeof fd === "number" && isInt32(fd) && fd > 0) {
-    if (guessHandleTypeFd(fd) !== "UDP") {
+    if (guessHandleType(fd) !== "UDP") {
       err = UV_EINVAL;
     } else {
       err = handle.open(fd);
@@ -115,6 +121,9 @@ function _createSocketHandle(address, port, addressType, fd, flags) {
 }
 
 function guessHandleType(fd) {
+  if (typeof fd !== "number" || !isInt32(fd) || fd < 0) {
+    return "UNKNOWN";
+  }
   return guessHandleTypeFd(fd);
 }
 
