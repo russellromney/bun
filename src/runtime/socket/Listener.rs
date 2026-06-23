@@ -291,6 +291,9 @@ impl Listener {
                 let this_value = js_Listener::to_js(this, global);
                 this_ref.strong_self.with_mut(|s| s.set(global, this_value));
                 this_ref.poll_ref.with_mut(|p| p.ref_(bun_io::js_vm_ctx()));
+                if let Some(ar) = crate::jsc_hooks::active_resources() {
+                    ar.listeners.insert(this as usize, ());
+                }
                 return Ok(this_value);
             }
         }
@@ -542,6 +545,9 @@ impl Listener {
         let this_value = js_Listener::to_js(this, global);
         this_ref.strong_self.with_mut(|s| s.set(global, this_value));
         this_ref.poll_ref.with_mut(|p| p.ref_(bun_io::js_vm_ctx()));
+        if let Some(ar) = crate::jsc_hooks::active_resources() {
+            ar.listeners.insert(this as usize, ());
+        }
 
         Ok(this_value)
     }
@@ -862,6 +868,9 @@ impl Listener {
 
         // connection / protos: dropped by heap::take below
         // Drop on Handlers handles unprotect.
+        if let Some(ar) = crate::jsc_hooks::active_resources() {
+            ar.listeners.remove(&(this as usize));
+        }
         // SAFETY: reclaim the Box allocated in listen()
         drop(unsafe { bun_core::heap::take(this) });
     }

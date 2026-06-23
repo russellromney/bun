@@ -695,6 +695,9 @@ mod _async_tasks {
             // KeepAlive::ref_ now takes the type-erased aio EventLoopCtx; the JS
             // event loop is the only one that owns AsyncFSTask/UVFSRequest.
             task.r#ref.ref_(bun_io::js_vm_ctx());
+            if let Some(ar) = crate::jsc_hooks::active_resources() {
+                ar.fs_requests.set(ar.fs_requests.get() + 1);
+            }
             let _ = vm;
             task.tracker.did_schedule(global_object);
 
@@ -1007,6 +1010,9 @@ mod _async_tasks {
             let this_ref = unsafe { &mut *this };
             // `bun_sys::Error` frees its path on Drop.
             this_ref.r#ref.unref(bun_io::js_vm_ctx());
+            if let Some(ar) = crate::jsc_hooks::active_resources() {
+                ar.fs_requests.set(ar.fs_requests.get().saturating_sub(1));
+            }
             // `args: ThreadSafe<A>` unprotects + drops via `heap::take` below.
             this_ref.promise = JSPromiseStrong::default();
             // SAFETY: paired with Box::leak in create()
@@ -1296,6 +1302,9 @@ mod _async_tasks {
             // KeepAlive::ref_ now takes the type-erased aio EventLoopCtx; the JS
             // event loop is the only one that owns AsyncFSTask/UVFSRequest.
             task.r#ref.ref_(bun_io::js_vm_ctx());
+            if let Some(ar) = crate::jsc_hooks::active_resources() {
+                ar.fs_requests.set(ar.fs_requests.get() + 1);
+            }
             let _ = vm;
             task.tracker.did_schedule(global_object);
             let promise = task.promise.value();
@@ -1379,6 +1388,9 @@ mod _async_tasks {
             // `bun_sys::Error` frees its path on Drop.
             // SAFETY: global_object outlives task; JSC_BORROW per LIFETIMES.tsv.
             this_ref.r#ref.unref(bun_io::js_vm_ctx());
+            if let Some(ar) = crate::jsc_hooks::active_resources() {
+                ar.fs_requests.set(ar.fs_requests.get().saturating_sub(1));
+            }
             // `args: ThreadSafe<A>` unprotects + drops via `heap::take` below.
             this_ref.promise = JSPromiseStrong::default();
             // SAFETY: paired with Box::leak in create()

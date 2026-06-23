@@ -45,6 +45,7 @@ test/js/node/test/parallel/test-stream-wrap-encoding.js [ FAIL ] # needs interna
 
 # Tests that are flaky
 test/js/bun/spawn/spawn-maxbuf.test.ts [ FLAKY ]
+[ ASAN ] test/regression/issue/30205.test.ts [ FLAKY ] # NapiFinalizerTask LSAN abort during --isolate global teardown — see #32176, #32144
 
 # Tests skipped due to different log/line outputs
 [ ASAN ] test/js/bun/util/reportError.test.ts [ SKIP ] # log line mismatch

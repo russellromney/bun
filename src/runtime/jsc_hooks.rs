@@ -96,6 +96,26 @@ pub struct RuntimeState {
     /// — far too large to construct on the stack inside `Box::new(RuntimeState{..})`.
     pub body_value_pool: Box<crate::webcore::body::HiveAllocator>,
     pub isolation_handles: IsolationHandles,
+    /// Live native handles/requests for `process.getActiveResourcesInfo()`.
+    pub active_resources: ActiveResources,
+}
+
+/// Per-thread registry of live native handles/requests, surfaced to JS via
+/// `process.getActiveResourcesInfo()`. Sockets and listeners are tracked as
+/// address sets (mirroring `timer::All::live_timer_internals`) so the
+/// query-time walk can read each entry's `poll_ref` and skip unref'd or
+/// closed handles; FS requests are a plain counter since they are not
+/// user-`unref()`able.
+#[derive(Default)]
+pub struct ActiveResources {
+    /// Live `NewSocket<false>` by heap address.
+    pub tcp_sockets: bun_collections::HashMap<usize, ()>,
+    /// Live `NewSocket<true>` by heap address.
+    pub tls_sockets: bun_collections::HashMap<usize, ()>,
+    /// Live `Listener` by heap address.
+    pub listeners: bun_collections::HashMap<usize, ()>,
+    /// In-flight `AsyncFSTask` count.
+    pub fs_requests: Cell<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -173,6 +193,19 @@ pub(crate) fn isolation_handles() -> Option<&'static mut IsolationHandles> {
     }
     // SAFETY: live boxed per-thread `RuntimeState`.
     Some(unsafe { &mut (*state).isolation_handles })
+}
+
+/// Per-thread [`ActiveResources`] registry. None only before
+/// [`init_runtime_state`] (e.g. `bun_jsc` unit tests with no high tier).
+/// Single JS thread; callers must not hold the borrow across JS re-entry.
+#[inline]
+pub(crate) fn active_resources() -> Option<&'static mut ActiveResources> {
+    let state = runtime_state();
+    if state.is_null() {
+        return None;
+    }
+    // SAFETY: live boxed per-thread `RuntimeState`.
+    Some(unsafe { &mut (*state).active_resources })
 }
 
 /// Per-VM lazy DNS resolver storage. Shared borrow only — c-ares callbacks
@@ -328,6 +361,7 @@ unsafe fn init_runtime_state(
         transpiler_arena: Box::new(bun_alloc::Arena::borrowing_default()),
         body_value_pool: Box::new(crate::webcore::body::HiveAllocator::init()),
         isolation_handles: IsolationHandles::default(),
+        active_resources: ActiveResources::default(),
     }));
     RUNTIME_STATE.with(|c| c.set(state));
 

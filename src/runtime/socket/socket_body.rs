@@ -406,7 +406,16 @@ impl<const SSL: bool> NewSocket<SSL> {
     }
 
     pub fn new(init: Self) -> *mut Self {
-        bun_core::heap::into_raw(Box::new(init))
+        let ptr = bun_core::heap::into_raw(Box::new(init));
+        if let Some(ar) = crate::jsc_hooks::active_resources() {
+            let set = if SSL {
+                &mut ar.tls_sockets
+            } else {
+                &mut ar.tcp_sockets
+            };
+            set.insert(ptr as usize, ());
+        }
+        ptr
     }
 
     pub fn memory_cost(&self) -> usize {
@@ -3096,6 +3105,14 @@ impl<const SSL: bool> NewSocket<SSL> {
         if let Some(ctx) = this_ref.owned_ssl_ctx.take() {
             // SAFETY: BoringSSL FFI; we hold one owned ref.
             unsafe { boringssl_sys::SSL_CTX_free(ctx) };
+        }
+        if let Some(ar) = crate::jsc_hooks::active_resources() {
+            let set = if SSL {
+                &mut ar.tls_sockets
+            } else {
+                &mut ar.tcp_sockets
+            };
+            set.remove(&(this as usize));
         }
         // SAFETY: `this` was heap-allocated in `new()`.
         drop(unsafe { bun_core::heap::take(this) });
