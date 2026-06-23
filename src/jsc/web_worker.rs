@@ -688,6 +688,8 @@ impl WebWorker {
     ///
     /// Takes `*mut` for the same reason as `set_ref`: the worker thread
     /// concurrently dereferences this struct.
+    // C++-only FFI entry point; the out-params are validated by the C++ caller.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     #[unsafe(export_name = "WebWorker__getEventLoopUtilization")]
     pub extern "C" fn get_event_loop_utilization(
         this: *mut WebWorker,
