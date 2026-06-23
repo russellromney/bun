@@ -630,6 +630,8 @@ pub struct QuicSession {
     /// Close options captured from a JS-initiated close, applied when the
     /// deferred close completes: (application?, code, reason).
     pending_close_error: JsCell<Option<(bool, u64, Vec<u8>)>>,
+    /// Whether this is the accepting (server) side of the connection.
+    is_server: Cell<bool>,
     /// The realm this session was created in (JS-thread only; outlives the
     /// session).
     global: Cell<*const JSGlobalObject>,
@@ -706,6 +708,7 @@ impl QuicSession {
             next_datagram_id: Cell::new(1),
             datagram_drop_newest: Cell::new(false),
             pending_close_error: JsCell::new(None),
+            is_server: Cell::new(false),
             global: Cell::new(core::ptr::from_ref(global)),
             event_loop_timer: JsCell::new(EventLoopTimer::init_paused(EventLoopTimerTag::QuicSession)),
             handshake_reported: Cell::new(false),
@@ -991,6 +994,7 @@ impl QuicSession {
             }
         };
 
+        this.is_server.set(true);
         let (mut settings, mut params) = Self::build_settings(global, options, true)?;
         settings.token = null();
         settings.tokenlen = 0;
@@ -1996,16 +2000,39 @@ impl QuicSession {
         Ok(self.local_addr.get().to_js_socket_address(global))
     }
 
-    pub(crate) fn get_certificate(&self, _global: &JSGlobalObject, _frame: &CallFrame) -> JsResult<JSValue> {
-        Ok(JSValue::UNDEFINED)
+    /// DER bytes of the certificate this side presented (the JS layer wraps
+    /// them in an X509Certificate), or undefined.
+    pub(crate) fn get_certificate(&self, global: &JSGlobalObject, _frame: &CallFrame) -> JsResult<JSValue> {
+        if self.destroyed.get() {
+            return Ok(JSValue::UNDEFINED);
+        }
+        let tls_guard = self.tls.get();
+        match tls_guard.as_ref().and_then(|tls| tls.local_certificate_der()) {
+            Some(der) => bun_jsc::ArrayBuffer::create::<{ bun_jsc::JSType::Uint8Array }>(global, &der),
+            None => Ok(JSValue::UNDEFINED),
+        }
     }
 
-    pub(crate) fn get_ephemeral_key(&self, _global: &JSGlobalObject, _frame: &CallFrame) -> JsResult<JSValue> {
-        Ok(JSValue::UNDEFINED)
+    /// Ephemeral key information for client sessions. The key parameters are
+    /// not exposed yet; an empty object reports "present" like Node when the
+    /// details are unavailable.
+    pub(crate) fn get_ephemeral_key(&self, global: &JSGlobalObject, _frame: &CallFrame) -> JsResult<JSValue> {
+        if self.destroyed.get() || self.is_server.get() || !self.handshake_reported.get() {
+            return Ok(JSValue::UNDEFINED);
+        }
+        Ok(JSValue::create_empty_object(global, 0))
     }
 
-    pub(crate) fn get_peer_certificate(&self, _global: &JSGlobalObject, _frame: &CallFrame) -> JsResult<JSValue> {
-        Ok(JSValue::UNDEFINED)
+    /// DER bytes of the certificate the peer presented, or undefined.
+    pub(crate) fn get_peer_certificate(&self, global: &JSGlobalObject, _frame: &CallFrame) -> JsResult<JSValue> {
+        if self.destroyed.get() {
+            return Ok(JSValue::UNDEFINED);
+        }
+        let tls_guard = self.tls.get();
+        match tls_guard.as_ref().and_then(|tls| tls.peer_certificate_der()) {
+            Some(der) => bun_jsc::ArrayBuffer::create::<{ bun_jsc::JSType::Uint8Array }>(global, &der),
+            None => Ok(JSValue::UNDEFINED),
+        }
     }
 
     pub(crate) fn update_key(&self, global: &JSGlobalObject, _frame: &CallFrame) -> JsResult<JSValue> {

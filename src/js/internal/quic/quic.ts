@@ -39,6 +39,15 @@ const {
 } = require("node:util/types");
 const { SocketAddress, BlockList } = require("node:net");
 
+// The native binding hands certificates over as DER bytes; expose them as
+// X509Certificate objects like Node does.
+let X509Certificate;
+function wrapCertificate(der) {
+  if (der === undefined) return undefined;
+  X509Certificate ??= require("node:crypto").X509Certificate;
+  return new X509Certificate(Buffer.from(der.buffer ?? der, der.byteOffset ?? 0, der.byteLength));
+}
+
 // ----------------------------------------------------------------------------
 // Stand-ins for the Node.js primordials used by the original source. The call
 // sites below are kept verbatim from upstream; these definitions provide the
@@ -3281,7 +3290,7 @@ class QuicSession {
   get certificate() {
     assertIsQuicSession(this);
     if (this.destroyed) return undefined;
-    return (this.#inner.certificate ??= this.#handle.getCertificate());
+    return (this.#inner.certificate ??= wrapCertificate(this.#handle.getCertificate()));
   }
 
   /**
@@ -3292,7 +3301,7 @@ class QuicSession {
   get peerCertificate() {
     assertIsQuicSession(this);
     if (this.destroyed) return undefined;
-    return (this.#inner.peerCertificate ??= this.#handle.getPeerCertificate());
+    return (this.#inner.peerCertificate ??= wrapCertificate(this.#handle.getPeerCertificate()));
   }
 
   /**

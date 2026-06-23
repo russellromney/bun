@@ -868,5 +868,11 @@ unsafe extern "C" {
     pub fn X509_STORE_free(store: *mut X509_STORE);
     pub fn X509_STORE_add_cert(store: *mut X509_STORE, x509: *mut X509) -> c_int;
 
+    /// Returns a NEW reference (caller frees) or null when the peer sent no
+    /// certificate.
+    pub fn SSL_get_peer_certificate(ssl: *const SSL) -> *mut X509;
+    /// Returns a BORROWED reference to the local certificate, or null.
+    pub fn SSL_get_certificate(ssl: *const SSL) -> *mut X509;
+
     pub fn RAND_bytes(buf: *mut u8, len: usize) -> c_int;
 }

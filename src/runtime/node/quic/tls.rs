@@ -266,6 +266,27 @@ fn load_private_key(ctx: *mut ssl::SSL_CTX, pem: &[u8]) -> Result<(), &'static s
     }
 }
 
+/// DER-encode a certificate.
+///
+/// # Safety
+/// `cert` must point at a live `X509`.
+unsafe fn x509_to_der(cert: *mut ssl::X509) -> Option<Vec<u8>> {
+    // SAFETY: per contract; i2d_X509 with a null out pointer returns the
+    // required length, then fills the buffer we allocate.
+    unsafe {
+        let len = ssl::i2d_X509(cert, null_mut());
+        if len <= 0 {
+            return None;
+        }
+        let mut der = vec![0u8; len as usize];
+        let mut out = der.as_mut_ptr();
+        if ssl::i2d_X509(cert, &mut out) != len {
+            return None;
+        }
+        Some(der)
+    }
+}
+
 /// Build an `X509_STORE` holding the supplied CA certificates.
 fn build_ca_store(ca_pem: &[Vec<u8>]) -> Result<*mut ssl::X509_STORE, &'static str> {
     // SAFETY: PEM buffers are live slices; the store owns the certs added to it.
@@ -465,6 +486,34 @@ impl TlsSession {
     pub(super) fn servername(&self) -> Option<String> {
         // SAFETY: `self.ssl` is live.
         Self::cstr_to_string(unsafe { ssl::SSL_get_servername(self.ssl, TLSEXT_NAMETYPE_HOST_NAME) })
+    }
+
+    /// DER encoding of the peer's certificate, if it presented one.
+    pub(super) fn peer_certificate_der(&self) -> Option<Vec<u8>> {
+        // SAFETY: `self.ssl` is live; SSL_get_peer_certificate returns a new
+        // reference we must free.
+        unsafe {
+            let cert = ssl::SSL_get_peer_certificate(self.ssl);
+            if cert.is_null() {
+                return None;
+            }
+            let der = x509_to_der(cert);
+            ssl::X509_free(cert);
+            der
+        }
+    }
+
+    /// DER encoding of the certificate this side is using, if any.
+    pub(super) fn local_certificate_der(&self) -> Option<Vec<u8>> {
+        // SAFETY: `self.ssl` is live; SSL_get_certificate returns a borrowed
+        // reference.
+        unsafe {
+            let cert = ssl::SSL_get_certificate(self.ssl);
+            if cert.is_null() {
+                return None;
+            }
+            x509_to_der(cert)
+        }
     }
 
     /// Peer-certificate validation result as Node-style `(reason, code)`
