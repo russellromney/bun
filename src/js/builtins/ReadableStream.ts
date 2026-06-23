@@ -371,7 +371,8 @@ export function createNativeReadableStream(nativePtr, autoAllocateChunkSize) {
 
 // https://streams.spec.whatwg.org/#rs-from
 export function from(asyncIterable) {
-  const iteratorMethod = asyncIterable?.[globalThis.Symbol.asyncIterator] ?? asyncIterable?.[globalThis.Symbol.iterator];
+  const iteratorMethod =
+    asyncIterable?.[globalThis.Symbol.asyncIterator] ?? asyncIterable?.[globalThis.Symbol.iterator];
   if (iteratorMethod == null || typeof iteratorMethod !== "function") {
     throw $ERR_ARG_NOT_ITERABLE(`${asyncIterable} must be iterable`);
   }
@@ -519,7 +520,8 @@ export function pipeTo(this, destination) {
   if (!$isWritableStream(internalDestination))
     return Promise.$reject(new TypeError("ReadableStream pipeTo requires a WritableStream"));
 
-  if ($isWritableStreamLocked(internalDestination)) return Promise.$reject($ERR_INVALID_STATE_TypeError("WritableStream is locked"));
+  if ($isWritableStreamLocked(internalDestination))
+    return Promise.$reject($ERR_INVALID_STATE_TypeError("WritableStream is locked"));
 
   return $readableStreamPipeToWritableStream(
     this,
