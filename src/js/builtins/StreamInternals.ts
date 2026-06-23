@@ -31,6 +31,24 @@ export function markPromiseAsHandled(promise: Promise<unknown>) {
   $pokePromiseAsHandled(promise);
 }
 
+// node:stream's finished()/eos() lazily attaches a promise capability to a web
+// ReadableStream/WritableStream (stored under "closedPromiseCapability" on the
+// stream itself) so it can observe close/error without locking the stream.
+// These settle that capability when present; streams that were never passed to
+// finished() pay only the private-field miss.
+export function resolveStreamClosedPromiseCapability(stream) {
+  const capability = $getByIdDirectPrivate(stream, "closedPromiseCapability");
+  if (capability) capability.resolve.$call();
+}
+
+export function rejectStreamClosedPromiseCapability(stream, error) {
+  const capability = $getByIdDirectPrivate(stream, "closedPromiseCapability");
+  if (capability) {
+    capability.reject.$call(undefined, error);
+    $markPromiseAsHandled(capability.promise);
+  }
+}
+
 export function shieldingPromiseResolve(result) {
   const promise = Promise.$resolve(result);
   if (promise.$then === undefined) promise.$then = $Promise.prototype.$then;

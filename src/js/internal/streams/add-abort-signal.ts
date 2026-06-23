@@ -1,6 +1,6 @@
 "use strict";
 
-const { isNodeStream, isWebStream, kControllerErrorFunction } = require("internal/streams/utils");
+const { isNodeStream, isWebStream, isReadableStream, isWritableStream } = require("internal/streams/utils");
 const eos = require("internal/streams/end-of-stream");
 
 const SymbolDispose = Symbol.dispose;
@@ -24,6 +24,30 @@ function addAbortSignal(signal, stream) {
   return addAbortSignalNoValidate(signal, stream);
 }
 
+// Bun's web streams don't carry Node's kControllerErrorFunction own property;
+// error the stream through its controller instead, mirroring controller.error()
+// (a no-op once the stream is no longer readable/writable).
+function webStreamControllerError(stream, error) {
+  if (isWritableStream(stream)) {
+    // The slots live on the internal stream object, not the public WritableStream.
+    const internalStream = $getInternalWritableStream(stream);
+    if ($getByIdDirectPrivate(internalStream, "state") === "writable") {
+      $writableStreamDefaultControllerError($getByIdDirectPrivate(internalStream, "controller"), error);
+    }
+    return;
+  }
+  if (isReadableStream(stream)) {
+    if ($getByIdDirectPrivate(stream, "state") !== $streamReadable) return;
+    const controller = $getByIdDirectPrivate(stream, "readableStreamController");
+    if (controller == null) return;
+    if ($isReadableStreamDefaultController(controller)) {
+      $readableStreamDefaultControllerError(controller, error);
+    } else {
+      $readableByteStreamControllerError(controller, error);
+    }
+  }
+}
+
 function addAbortSignalNoValidate(signal, stream) {
   if (typeof signal !== "object" || !("aborted" in signal)) {
     return stream;
@@ -33,7 +57,7 @@ function addAbortSignalNoValidate(signal, stream) {
         stream.destroy($makeAbortError(undefined, { cause: signal.reason }));
       }
     : () => {
-        stream[kControllerErrorFunction]($makeAbortError(undefined, { cause: signal.reason }));
+        webStreamControllerError(stream, $makeAbortError(undefined, { cause: signal.reason }));
       };
   if (signal.aborted) {
     onAbort();

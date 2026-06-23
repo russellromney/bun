@@ -318,6 +318,7 @@ export function writableStreamFinishInFlightClose(stream) {
 
   const writer = $getByIdDirectPrivate(stream, "writer");
   if (writer !== undefined) $getByIdDirectPrivate(writer, "closedPromise").resolve.$call();
+  $resolveStreamClosedPromiseCapability(stream);
 
   $assert($getByIdDirectPrivate(stream, "pendingAbortRequest") === undefined);
   $assert($getByIdDirectPrivate(stream, "storedError") === undefined);
@@ -406,6 +407,7 @@ export function writableStreamRejectCloseAndClosedPromiseIfNeeded(stream) {
     closedPromise.reject.$call(undefined, storedError);
     $markPromiseAsHandled(closedPromise.promise);
   }
+  $rejectStreamClosedPromiseCapability(stream, storedError);
 }
 
 export function writableStreamStartErroring(stream, reason) {

@@ -19,7 +19,6 @@ const {
   isWritableErrored,
   isNodeStream,
   willEmitClose: _willEmitClose,
-  kIsClosedPromise,
 } = require("internal/streams/utils");
 
 const SymbolDispose = Symbol.dispose;
@@ -346,8 +345,39 @@ function eosWeb(stream, options, callback) {
       process.nextTick(() => callback.$apply(stream, args));
     }
   };
-  PromisePrototypeThen.$call(stream[kIsClosedPromise].promise, resolverFn, resolverFn);
+  PromisePrototypeThen.$call(webStreamClosedPromise(stream), resolverFn, resolverFn);
   return nop;
+}
+
+// Bun's web streams don't carry Node's kIsClosedPromise own property. Observe
+// close/error by lazily attaching a promise capability to the stream that
+// ReadableStreamInternals/WritableStreamInternals settle on the closed/errored
+// state transitions (resolveStreamClosedPromiseCapability and
+// rejectStreamClosedPromiseCapability in StreamInternals.ts).
+function webStreamClosedPromise(stream) {
+  // A WritableStream wraps an internal stream object that holds its slots and
+  // is what WritableStreamInternals operates on; a ReadableStream stores its
+  // slots on itself.
+  const target = isWritableStream(stream) ? $getInternalWritableStream(stream) : stream;
+
+  const capability = $getByIdDirectPrivate(target, "closedPromiseCapability");
+  if (capability) return capability.promise;
+
+  // ReadableStream stores its state as a number ($streamClosed/$streamErrored),
+  // WritableStream as a string.
+  const state = $getByIdDirectPrivate(target, "state");
+  if (state === $streamClosed || state === "closed") {
+    return Promise.$resolve(undefined);
+  }
+  if (state === $streamErrored || state === "errored") {
+    const promise = Promise.$reject($getByIdDirectPrivate(target, "storedError"));
+    $markPromiseAsHandled(promise);
+    return promise;
+  }
+
+  const created = $newPromiseCapability(Promise);
+  $putByIdDirectPrivate(target, "closedPromiseCapability", created);
+  return created.promise;
 }
 
 function finished(stream, opts) {

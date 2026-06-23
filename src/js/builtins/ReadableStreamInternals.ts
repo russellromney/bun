@@ -701,8 +701,10 @@ export function readDirectStream(stream, sink, underlyingSource) {
       if (reason) {
         $putByIdDirectPrivate(stream, "state", $streamErrored);
         $putByIdDirectPrivate(stream, "storedError", reason);
+        $rejectStreamClosedPromiseCapability(stream, reason);
       } else {
         $putByIdDirectPrivate(stream, "state", $streamClosed);
+        $resolveStreamClosedPromiseCapability(stream);
       }
       stream = undefined;
     }
@@ -1524,6 +1526,7 @@ export function readableStreamError(stream, error) {
   $assert($isReadableStream(stream));
   $putByIdDirectPrivate(stream, "state", $streamErrored);
   $putByIdDirectPrivate(stream, "storedError", error);
+  $rejectStreamClosedPromiseCapability(stream, error);
   const reader = $getByIdDirectPrivate(stream, "reader");
 
   if (!reader) return;
@@ -1705,6 +1708,7 @@ export function readableStreamClose(stream) {
       $getByIdDirectPrivate(stream, "state") === $streamClosing,
   );
   $putByIdDirectPrivate(stream, "state", $streamClosed);
+  $resolveStreamClosedPromiseCapability(stream);
   const reader = $getByIdDirectPrivate(stream, "reader");
   if (!reader) return;
 
