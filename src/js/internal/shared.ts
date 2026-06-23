@@ -37,19 +37,6 @@ function hideFromStack(...fns: Function[]) {
   }
 }
 
-let warned: Set<string>;
-function warnNotImplementedOnce(feature: string, issue?: number) {
-  if (!warned) {
-    warned = new Set();
-  }
-
-  if (warned.has(feature)) {
-    return;
-  }
-  warned.add(feature);
-  console.warn(new NotImplementedError(feature, issue));
-}
-
 let util: typeof import("node:util");
 class ExceptionWithHostPort extends Error {
   errno: number;
@@ -298,7 +285,6 @@ export default {
   NotImplementedError,
   throwNotImplemented,
   hideFromStack,
-  warnNotImplementedOnce,
   eventLoopUtilization,
   ExceptionWithHostPort,
   NodeAggregateError,
