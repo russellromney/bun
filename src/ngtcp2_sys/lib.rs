@@ -98,6 +98,9 @@ pub const NGTCP2_WRITE_STREAM_FLAG_FIN: u32 = 0x02;
 pub const NGTCP2_STREAM_DATA_FLAG_FIN: u32 = 0x01;
 pub const NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET: u32 = 0x01;
 
+pub const NGTCP2_WRITE_DATAGRAM_FLAG_NONE: u32 = 0;
+pub const NGTCP2_DATAGRAM_FLAG_0RTT: u32 = 0x01;
+
 // ── Opaque handles ─────────────────────────────────────────────────────────
 
 #[repr(C)]
@@ -771,6 +774,21 @@ unsafe extern "C" {
         pdatalen: *mut ngtcp2_ssize,
         flags: u32,
         stream_id: i64,
+        datav: *const ngtcp2_vec,
+        datavcnt: usize,
+        ts: ngtcp2_tstamp,
+    ) -> ngtcp2_ssize;
+
+    pub fn ngtcp2_conn_writev_datagram_versioned(
+        conn: *mut ngtcp2_conn,
+        path: *mut ngtcp2_path,
+        pkt_info_version: c_int,
+        pi: *mut ngtcp2_pkt_info,
+        dest: *mut u8,
+        destlen: usize,
+        paccepted: *mut c_int,
+        flags: u32,
+        dgram_id: u64,
         datav: *const ngtcp2_vec,
         datavcnt: usize,
         ts: ngtcp2_tstamp,

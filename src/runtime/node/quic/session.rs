@@ -45,7 +45,16 @@ enum StreamEvent {
     Drain(i64),
     /// The stream is blocked on stream-level flow control.
     Blocked(i64),
+    /// A DATAGRAM frame arrived from the peer.
+    Datagram { bytes: Vec<u8>, early: bool },
+    /// A previously sent datagram was acknowledged or declared lost.
+    DatagramStatus { id: u64, lost: bool },
 }
+
+/// `Session::State.listener_flags` bits the JS layer sets when the matching
+/// callback is installed (lib/internal/quic/state.js).
+const LISTENER_FLAG_DATAGRAM: u32 = 0x2;
+const LISTENER_FLAG_DATAGRAM_STATUS: u32 = 0x4;
 
 /// Mirrors Node's `Session::State` (`SESSION_STATE` in node/src/quic/session.cc).
 /// `IDX_STATE_SESSION_*` binding constants are `offset_of!` values into this.
@@ -354,6 +363,43 @@ unsafe extern "C" fn extend_max_stream_data_cb(
     0
 }
 
+unsafe extern "C" fn recv_datagram_cb(
+    _conn: *mut ngtcp2::ngtcp2_conn,
+    flags: u32,
+    data: *const u8,
+    datalen: usize,
+    user_data: *mut c_void,
+) -> c_int {
+    let bytes = if data.is_null() || datalen == 0 {
+        Vec::new()
+    } else {
+        // SAFETY: ngtcp2 hands us `datalen` readable bytes valid only for the
+        // duration of this callback; copy what we keep.
+        unsafe { core::slice::from_raw_parts(data, datalen) }.to_vec()
+    };
+    let early = flags & ngtcp2::NGTCP2_DATAGRAM_FLAG_0RTT != 0;
+    push_stream_event(user_data, StreamEvent::Datagram { bytes, early });
+    0
+}
+
+unsafe extern "C" fn ack_datagram_cb(
+    _conn: *mut ngtcp2::ngtcp2_conn,
+    dgram_id: u64,
+    user_data: *mut c_void,
+) -> c_int {
+    push_stream_event(user_data, StreamEvent::DatagramStatus { id: dgram_id, lost: false });
+    0
+}
+
+unsafe extern "C" fn lost_datagram_cb(
+    _conn: *mut ngtcp2::ngtcp2_conn,
+    dgram_id: u64,
+    user_data: *mut c_void,
+) -> c_int {
+    push_stream_event(user_data, StreamEvent::DatagramStatus { id: dgram_id, lost: true });
+    0
+}
+
 unsafe extern "C" fn acked_stream_data_offset_cb(
     _conn: *mut ngtcp2::ngtcp2_conn,
     stream_id: i64,
@@ -399,6 +445,9 @@ fn build_callbacks(is_server: bool) -> ngtcp2::ngtcp2_callbacks {
     cb.stream_reset = Some(stream_reset_cb);
     cb.extend_max_stream_data = Some(extend_max_stream_data_cb);
     cb.acked_stream_data_offset = Some(acked_stream_data_offset_cb);
+    cb.recv_datagram = Some(recv_datagram_cb);
+    cb.ack_datagram = Some(ack_datagram_cb);
+    cb.lost_datagram = Some(lost_datagram_cb);
     cb
 }
 
@@ -450,6 +499,9 @@ pub struct QuicSession {
     /// Stream activity queued by the ngtcp2 callbacks, dispatched to JS after
     /// the current packet/expiry processing finishes.
     stream_events: JsCell<Vec<StreamEvent>>,
+    /// Datagrams queued by `sendDatagram`, written by the flush loop.
+    datagram_queue: JsCell<std::collections::VecDeque<(u64, Box<[u8]>)>>,
+    next_datagram_id: Cell<u64>,
     /// The realm this session was created in (JS-thread only; outlives the
     /// session).
     global: Cell<*const JSGlobalObject>,
@@ -522,6 +574,8 @@ impl QuicSession {
             registered_cids: JsCell::new(Vec::new()),
             streams: JsCell::new(HashMap::new()),
             stream_events: JsCell::new(Vec::new()),
+            datagram_queue: JsCell::new(std::collections::VecDeque::new()),
+            next_datagram_id: Cell::new(1),
             global: Cell::new(core::ptr::from_ref(global)),
             event_loop_timer: JsCell::new(EventLoopTimer::init_paused(EventLoopTimerTag::QuicSession)),
             handshake_reported: Cell::new(false),
@@ -619,6 +673,9 @@ impl QuicSession {
         params.initial_max_streams_uni = 3;
         params.max_idle_timeout = 10 * ngtcp2::NGTCP2_SECONDS;
         params.active_connection_id_limit = 2;
+        // Accept DATAGRAM frames up to a full packet by default
+        // (node/src/quic/transportparams.h max_datagram_frame_size).
+        params.max_datagram_frame_size = ngtcp2::NGTCP2_MAX_UDP_PAYLOAD_SIZE as u64;
         if is_server {
             params.initial_max_streams_bidi = 100;
         }
@@ -1121,6 +1178,45 @@ impl QuicSession {
                             }
                         }
                     }
+                    StreamEvent::Datagram { bytes, early } => {
+                        // SAFETY: state buffer is live while the wrapper is.
+                        let wants = unsafe { (*self.state_mut()).listener_flags } & LISTENER_FLAG_DATAGRAM != 0;
+                        if !wants {
+                            continue;
+                        }
+                        let payload = bun_jsc::ArrayBuffer::create::<{ bun_jsc::JSType::Uint8Array }>(global, &bytes)
+                            .unwrap_or(JSValue::UNDEFINED);
+                        if let Some(callback) = callbacks::get(global, "onSessionDatagram") {
+                            let vm = global.bun_vm().as_mut();
+                            vm.event_loop_ref().run_callback(
+                                callback,
+                                global,
+                                self.handle(),
+                                &[payload, JSValue::js_boolean(early)],
+                            );
+                        }
+                    }
+                    StreamEvent::DatagramStatus { id, lost } => {
+                        // SAFETY: state buffer is live while the wrapper is.
+                        let wants =
+                            unsafe { (*self.state_mut()).listener_flags } & LISTENER_FLAG_DATAGRAM_STATUS != 0;
+                        if !wants {
+                            continue;
+                        }
+                        let status = if lost { "lost" } else { "acknowledged" };
+                        let status = bun_core::String::static_(status.as_bytes())
+                            .to_js(global)
+                            .unwrap_or(JSValue::UNDEFINED);
+                        if let Some(callback) = callbacks::get(global, "onSessionDatagramStatus") {
+                            let vm = global.bun_vm().as_mut();
+                            vm.event_loop_ref().run_callback(
+                                callback,
+                                global,
+                                self.handle(),
+                                &[JSValue::from_uint64_no_truncate(global, id), status],
+                            );
+                        }
+                    }
                 }
             }
             for (id, fin) in to_wake {
@@ -1156,6 +1252,10 @@ impl QuicSession {
         }
         let endpoint = self.endpoint.get();
         if endpoint.is_null() {
+            return;
+        }
+        self.flush_datagrams();
+        if self.destroyed.get() || self.conn.get().is_null() {
             return;
         }
         let mut buf = [0u8; MAX_SEND_PACKET];
@@ -1389,6 +1489,19 @@ impl QuicSession {
         unsafe {
             (*self.state_mut()).handshake_completed = 1;
             (*self.state_mut()).stream_open_allowed = 1;
+        }
+        // The negotiated datagram limit comes from the peer's transport
+        // params (0 = peer does not accept DATAGRAM frames), capped by what
+        // fits in a single packet.
+        // SAFETY: `conn` is live; the returned params are conn-owned.
+        let remote_mdfs = unsafe {
+            let params = ngtcp2::ngtcp2_conn_get_remote_transport_params(self.conn.get());
+            if params.is_null() { 0 } else { (*params).max_datagram_frame_size }
+        };
+        // SAFETY: state buffer is live while the wrapper is.
+        unsafe {
+            (*self.state_mut()).max_datagram_size =
+                remote_mdfs.min(ngtcp2::NGTCP2_MAX_UDP_PAYLOAD_SIZE as u64) as u16;
         }
 
         let tls_guard = self.tls.get();
@@ -1838,8 +1951,93 @@ impl QuicSession {
         timer_all().update(self.event_loop_timer.as_ptr(), &next);
     }
 
-    pub(crate) fn send_datagram(&self, global: &JSGlobalObject, _frame: &CallFrame) -> JsResult<JSValue> {
-        Err(global.throw(format_args!("QuicSession.sendDatagram is not implemented yet")))
+    /// `sendDatagram(view)` — queue an unreliable datagram; returns its id as
+    /// a BigInt (0n when it could not be queued). Size/support checks live in JS.
+    pub(crate) fn send_datagram(&self, global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
+        if self.destroyed.get() || self.conn.get().is_null() {
+            return Ok(JSValue::from_uint64_no_truncate(global, 0));
+        }
+        let data = frame.arguments_as_array::<1>()[0];
+        let Some(buf) = data.as_array_buffer(global) else {
+            return Ok(JSValue::from_uint64_no_truncate(global, 0));
+        };
+        let bytes: Box<[u8]> = buf.byte_slice().to_vec().into_boxed_slice();
+        let id = self.next_datagram_id.get();
+        self.next_datagram_id.set(id + 1);
+        self.datagram_queue.with_mut(|queue| queue.push_back((id, bytes)));
+        // SAFETY: state buffer is live while the wrapper is.
+        unsafe { (*self.state_mut()).last_datagram_id = id };
+        self.flush(global);
+        self.schedule_event_dispatch();
+        self.rearm_timer();
+        Ok(JSValue::from_uint64_no_truncate(global, id))
+    }
+
+    /// Write queued DATAGRAM frames. Datagrams are fire-and-forget: ngtcp2
+    /// copies the payload into the packet, so nothing needs to outlive the
+    /// call.
+    fn flush_datagrams(&self) {
+        if self.destroyed.get() || self.conn.get().is_null() {
+            return;
+        }
+        let endpoint = self.endpoint.get();
+        if endpoint.is_null() {
+            return;
+        }
+        let mut buf = [0u8; MAX_SEND_PACKET];
+        let (path_local, path_remote) = (self.local_addr.get(), self.remote_addr.get());
+        loop {
+            let Some((id, bytes)) = self.datagram_queue.with_mut(std::collections::VecDeque::pop_front) else {
+                return;
+            };
+            let mut path = ngtcp2::ngtcp2_path {
+                local: path_local.ngtcp2_addr(),
+                remote: path_remote.ngtcp2_addr(),
+                user_data: null_mut(),
+            };
+            let mut pi = ngtcp2::ngtcp2_pkt_info::default();
+            let mut accepted: c_int = 0;
+            let datav = ngtcp2::ngtcp2_vec { base: bytes.as_ptr(), len: bytes.len() };
+            // SAFETY: `conn` is live; the data vector points at `bytes`, which
+            // outlives the call (datagram payloads are copied into the packet).
+            let n = unsafe {
+                ngtcp2::ngtcp2_conn_writev_datagram_versioned(
+                    self.conn.get(),
+                    &mut path,
+                    ngtcp2::NGTCP2_PKT_INFO_VERSION,
+                    &mut pi,
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut accepted,
+                    ngtcp2::NGTCP2_WRITE_DATAGRAM_FLAG_NONE,
+                    id,
+                    &datav,
+                    1,
+                    now_ns(),
+                )
+            };
+            if n < 0 {
+                // The datagram cannot be sent (too large for the negotiated
+                // limit, datagrams unsupported, ...): drop it and report it
+                // lost rather than wedging the queue.
+                self.stream_events
+                    .with_mut(|events| events.push(StreamEvent::DatagramStatus { id, lost: true }));
+                continue;
+            }
+            if n > 0 {
+                let remote = self.remote_addr.get();
+                // SAFETY: endpoint outlives the session (held via endpoint_js).
+                unsafe { (*endpoint).send_packet(&buf[..n as usize], &remote) };
+                self.add_stat(IDX_STATS_PKT_SENT, 1);
+                self.add_stat(IDX_STATS_BYTES_SENT, n as u64);
+            }
+            if accepted == 0 {
+                // The datagram did not fit this round (congestion or packet
+                // already full); keep it queued and try again on the next flush.
+                self.datagram_queue.with_mut(|queue| queue.push_front((id, bytes)));
+                return;
+            }
+        }
     }
 
     fn transport_params_to_js(
