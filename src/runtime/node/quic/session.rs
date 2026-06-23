@@ -49,12 +49,18 @@ enum StreamEvent {
     Datagram { bytes: Vec<u8>, early: bool },
     /// A previously sent datagram was acknowledged or declared lost.
     DatagramStatus { id: u64, lost: bool },
+    /// The TLS stack issued a session ticket usable for resumption.
+    SessionTicket(Vec<u8>),
+    /// The peer sent a NEW_TOKEN frame for future address validation.
+    NewToken(Vec<u8>),
 }
 
 /// `Session::State.listener_flags` bits the JS layer sets when the matching
 /// callback is installed (lib/internal/quic/state.js).
 const LISTENER_FLAG_DATAGRAM: u32 = 0x2;
 const LISTENER_FLAG_DATAGRAM_STATUS: u32 = 0x4;
+const LISTENER_FLAG_SESSION_TICKET: u32 = 0x8;
+const LISTENER_FLAG_NEW_TOKEN: u32 = 0x10;
 
 /// Mirrors Node's `Session::State` (`SESSION_STATE` in node/src/quic/session.cc).
 /// `IDX_STATE_SESSION_*` binding constants are `offset_of!` values into this.
@@ -181,6 +187,10 @@ impl StoredAddr {
 
     pub(super) fn as_ptr(&self) -> *const u8 {
         self.bytes.as_ptr()
+    }
+
+    pub(super) fn len(&self) -> u32 {
+        self.len
     }
 
     fn ngtcp2_addr(&self) -> ngtcp2::ngtcp2_addr {
@@ -414,6 +424,58 @@ unsafe extern "C" fn extend_max_stream_data_cb(
     0
 }
 
+/// BoringSSL new-session callback (client): serialize the ticket and queue it
+/// for the JS layer. Returning 0 tells BoringSSL we did not take ownership.
+pub(super) unsafe extern "C" fn tls_new_session_cb(
+    ssl_ptr: *mut ssl::SSL,
+    tls_session: *mut ssl::SSL_SESSION,
+) -> c_int {
+    if ssl_ptr.is_null() || tls_session.is_null() {
+        return 0;
+    }
+    // SAFETY: the SSL's app-data slot holds the ngtcp2_crypto_conn_ref whose
+    // user_data is the owning QuicSession (set at session creation).
+    unsafe {
+        let conn_ref = ssl::SSL_get_ex_data(ssl_ptr, 0).cast::<ngtcp2::ngtcp2_crypto_conn_ref>();
+        if conn_ref.is_null() {
+            return 0;
+        }
+        let session_ptr = (*conn_ref).user_data.cast::<QuicSession>();
+        if session_ptr.is_null() {
+            return 0;
+        }
+        let len = ssl::i2d_SSL_SESSION(tls_session, null_mut());
+        if len <= 0 {
+            return 0;
+        }
+        let mut der = vec![0u8; len as usize];
+        let mut out = der.as_mut_ptr();
+        if ssl::i2d_SSL_SESSION(tls_session, &mut out) != len {
+            return 0;
+        }
+        let session = &*session_ptr;
+        session.stream_events.with_mut(|events| events.push(StreamEvent::SessionTicket(der)));
+        session.schedule_event_dispatch();
+    }
+    0
+}
+
+unsafe extern "C" fn recv_new_token_cb(
+    _conn: *mut ngtcp2::ngtcp2_conn,
+    token: *const u8,
+    tokenlen: usize,
+    user_data: *mut c_void,
+) -> c_int {
+    if token.is_null() || tokenlen == 0 {
+        return 0;
+    }
+    // SAFETY: ngtcp2 hands us `tokenlen` readable bytes valid only for the
+    // duration of this callback; copy what we keep.
+    let bytes = unsafe { core::slice::from_raw_parts(token, tokenlen) }.to_vec();
+    push_stream_event(user_data, StreamEvent::NewToken(bytes));
+    0
+}
+
 unsafe extern "C" fn recv_datagram_cb(
     _conn: *mut ngtcp2::ngtcp2_conn,
     flags: u32,
@@ -500,6 +562,9 @@ fn build_callbacks(is_server: bool) -> ngtcp2::ngtcp2_callbacks {
     cb.recv_datagram = Some(recv_datagram_cb);
     cb.ack_datagram = Some(ack_datagram_cb);
     cb.lost_datagram = Some(lost_datagram_cb);
+    if !is_server {
+        cb.recv_new_token = Some(recv_new_token_cb);
+    }
     cb
 }
 
@@ -856,6 +921,7 @@ impl QuicSession {
 
     /// Create a client session: build TLS + ngtcp2 conn, register routing,
     /// send the initial flight. Returns the JS handle.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new_client(
         global: &JSGlobalObject,
         endpoint: *mut QuicEndpoint,
@@ -863,6 +929,7 @@ impl QuicSession {
         local_addr: StoredAddr,
         remote_addr: StoredAddr,
         options: JSValue,
+        session_ticket: JSValue,
     ) -> JsResult<JSValue> {
         validate_transport_params(global, options)?;
         let (raw, handle) = Self::create_shell(global, endpoint, endpoint_handle, local_addr, remote_addr)?;
@@ -935,6 +1002,14 @@ impl QuicSession {
         // SAFETY: `conn` and `tls.ssl()` are both live; ngtcp2 only stores the
         // pointer.
         unsafe { ngtcp2::ngtcp2_conn_set_tls_native_handle(conn, tls.ssl().cast()) };
+
+        // Offer a previously issued session ticket for resumption before the
+        // handshake starts.
+        if !session_ticket.is_empty_or_undefined_or_null() {
+            if let Some(buf) = session_ticket.as_array_buffer(global) {
+                tls.set_session_ticket(buf.byte_slice());
+            }
+        }
 
         this.conn.set(conn);
         this.tls.set(Some(tls));
@@ -1356,6 +1431,38 @@ impl QuicSession {
                             );
                         }
                     }
+                    StreamEvent::SessionTicket(der) => {
+                        // SAFETY: state buffer is live while the wrapper is.
+                        let wants =
+                            unsafe { (*self.state_mut()).listener_flags } & LISTENER_FLAG_SESSION_TICKET != 0;
+                        if !wants {
+                            continue;
+                        }
+                        let Ok(ticket) = bun_jsc::ArrayBuffer::create_buffer(global, &der) else { continue };
+                        if let Some(callback) = callbacks::get(global, "onSessionTicket") {
+                            let vm = global.bun_vm().as_mut();
+                            vm.event_loop_ref().run_callback(callback, global, self.handle(), &[ticket]);
+                        }
+                    }
+                    StreamEvent::NewToken(token) => {
+                        // SAFETY: state buffer is live while the wrapper is.
+                        let wants =
+                            unsafe { (*self.state_mut()).listener_flags } & LISTENER_FLAG_NEW_TOKEN != 0;
+                        if !wants {
+                            continue;
+                        }
+                        let Ok(token) = bun_jsc::ArrayBuffer::create_buffer(global, &token) else { continue };
+                        let address = self.remote_addr.get().to_js_socket_address(global);
+                        if let Some(callback) = callbacks::get(global, "onSessionNewToken") {
+                            let vm = global.bun_vm().as_mut();
+                            vm.event_loop_ref().run_callback(
+                                callback,
+                                global,
+                                self.handle(),
+                                &[token, address],
+                            );
+                        }
+                    }
                 }
             }
             for (id, fin) in to_wake {
@@ -1644,6 +1751,39 @@ impl QuicSession {
             (*self.state_mut()).handshake_completed = 1;
             (*self.state_mut()).stream_open_allowed = 1;
         }
+        // Servers hand the client an address-validation token it can present
+        // on a future connection (NEW_TOKEN frame).
+        if self.is_server.get() {
+            let endpoint = self.endpoint.get();
+            let remote = self.remote_addr.get();
+            if !endpoint.is_null() && remote.is_set() {
+                let mut token = [0u8; ngtcp2::NGTCP2_CRYPTO_MAX_REGULAR_TOKENLEN];
+                // SAFETY: endpoint outlives the session; the remote sockaddr
+                // copy lives on this stack frame for the duration of the call.
+                let token_len = unsafe {
+                    let secret = (*endpoint).token_secret();
+                    ngtcp2::ngtcp2_crypto_generate_regular_token(
+                        token.as_mut_ptr(),
+                        secret.as_ptr(),
+                        secret.len(),
+                        remote.as_ptr().cast(),
+                        remote.len(),
+                        now_ns(),
+                    )
+                };
+                if token_len > 0 {
+                    // SAFETY: `conn` is live; the token bytes are copied by ngtcp2.
+                    unsafe {
+                        ngtcp2::ngtcp2_conn_submit_new_token(
+                            self.conn.get(),
+                            token.as_ptr(),
+                            token_len as usize,
+                        );
+                    }
+                }
+            }
+        }
+
         // The negotiated datagram limit comes from the peer's transport
         // params (0 = peer does not accept DATAGRAM frames), reduced by the
         // DATAGRAM frame header overhead.

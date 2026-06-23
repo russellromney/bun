@@ -824,11 +824,17 @@ opaque!(
     /// `struct ssl_cipher_st` (`typedef ... SSL_CIPHER`).
     SSL_CIPHER
 );
+opaque!(
+    /// `struct ssl_session_st` (`typedef ... SSL_SESSION`).
+    SSL_SESSION
+);
 
 /// `TLS1_3_VERSION` (`openssl/tls1.h`).
 pub const TLS1_3_VERSION: u16 = 0x0304;
 /// `X509_V_OK` (`openssl/x509.h`).
 pub const X509_V_OK: c_long = 0;
+/// `SSL_SESS_CACHE_CLIENT` (`openssl/ssl.h`).
+pub const SSL_SESS_CACHE_CLIENT: c_int = 1;
 
 unsafe extern "C" {
     pub safe fn TLS_method() -> *const SSL_METHOD;
@@ -873,6 +879,20 @@ unsafe extern "C" {
     pub fn SSL_get_peer_certificate(ssl: *const SSL) -> *mut X509;
     /// Returns a BORROWED reference to the local certificate, or null.
     pub fn SSL_get_certificate(ssl: *const SSL) -> *mut X509;
+
+    pub fn SSL_CTX_set_session_cache_mode(ctx: *mut SSL_CTX, mode: c_int) -> c_int;
+    pub fn SSL_CTX_sess_set_new_cb(
+        ctx: *mut SSL_CTX,
+        cb: Option<unsafe extern "C" fn(ssl: *mut SSL, session: *mut SSL_SESSION) -> c_int>,
+    );
+    pub fn i2d_SSL_SESSION(session: *mut SSL_SESSION, pp: *mut *mut u8) -> c_int;
+    pub fn d2i_SSL_SESSION(
+        a: *mut *mut SSL_SESSION,
+        pp: *mut *const u8,
+        length: c_long,
+    ) -> *mut SSL_SESSION;
+    pub fn SSL_set_session(ssl: *mut SSL, session: *mut SSL_SESSION) -> c_int;
+    pub fn SSL_SESSION_free(session: *mut SSL_SESSION);
 
     pub fn RAND_bytes(buf: *mut u8, len: usize) -> c_int;
 }

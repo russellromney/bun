@@ -401,6 +401,11 @@ impl TlsSession {
             } else {
                 ssl::SSL_set_connect_state(ssl_ptr);
 
+                // Receive TLS session tickets so the JS layer can offer
+                // resumption (onSessionTicket → connect({sessionTicket})).
+                ssl::SSL_CTX_set_session_cache_mode(ctx, ssl::SSL_SESS_CACHE_CLIENT);
+                ssl::SSL_CTX_sess_set_new_cb(ctx, Some(super::session::tls_new_session_cb));
+
                 // Client ALPN offer.
                 if !config.alpn.is_empty()
                     && ssl::SSL_set_alpn_protos(ssl_ptr, config.alpn.as_ptr(), config.alpn.len()) != 0
@@ -486,6 +491,31 @@ impl TlsSession {
     pub(super) fn servername(&self) -> Option<String> {
         // SAFETY: `self.ssl` is live.
         Self::cstr_to_string(unsafe { ssl::SSL_get_servername(self.ssl, TLSEXT_NAMETYPE_HOST_NAME) })
+    }
+
+    /// Offer a previously received TLS session ticket for resumption. The
+    /// bytes are application-provided (from a prior `onSessionTicket` event);
+    /// BoringSSL's DER parser handles malformed input, but reject sizes no
+    /// real ticket can reach before parsing. Returns false when the ticket
+    /// cannot be used.
+    pub(super) fn set_session_ticket(&self, der: &[u8]) -> bool {
+        const MAX_SESSION_TICKET_BYTES: usize = 16 * 1024;
+        if der.is_empty() || der.len() > MAX_SESSION_TICKET_BYTES {
+            return false;
+        }
+        // SAFETY: `self.ssl` is live; d2i reads `der.len()` bytes from the
+        // live slice and returns an owned SSL_SESSION we release after
+        // SSL_set_session takes its own reference.
+        unsafe {
+            let mut ptr = der.as_ptr();
+            let session = ssl::d2i_SSL_SESSION(null_mut(), &mut ptr, der.len() as _);
+            if session.is_null() {
+                return false;
+            }
+            let ok = ssl::SSL_set_session(self.ssl, session) == 1;
+            ssl::SSL_SESSION_free(session);
+            ok
+        }
     }
 
     /// DER encoding of the peer's certificate, if it presented one.

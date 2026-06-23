@@ -101,6 +101,10 @@ pub const NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET: u32 = 0x01;
 pub const NGTCP2_WRITE_DATAGRAM_FLAG_NONE: u32 = 0;
 pub const NGTCP2_DATAGRAM_FLAG_0RTT: u32 = 0x01;
 
+/// `NGTCP2_CRYPTO_MAX_REGULAR_TOKENLEN` (ngtcp2_crypto.h): magic byte +
+/// timestamp + AEAD tag + random.
+pub const NGTCP2_CRYPTO_MAX_REGULAR_TOKENLEN: usize = 1 + 8 + 16 + 16;
+
 // ── Opaque handles ─────────────────────────────────────────────────────────
 
 #[repr(C)]
@@ -807,6 +811,15 @@ unsafe extern "C" {
 
     pub fn ngtcp2_conn_get_ccerr(conn: *mut ngtcp2_conn) -> *const ngtcp2_ccerr;
     pub fn ngtcp2_conn_set_keep_alive_timeout(conn: *mut ngtcp2_conn, timeout: ngtcp2_duration);
+    pub fn ngtcp2_conn_submit_new_token(conn: *mut ngtcp2_conn, token: *const u8, tokenlen: usize) -> c_int;
+    pub fn ngtcp2_crypto_generate_regular_token(
+        token: *mut u8,
+        secret: *const u8,
+        secretlen: usize,
+        remote_addr: *const ngtcp2_sockaddr,
+        remote_addrlen: ngtcp2_socklen,
+        ts: ngtcp2_tstamp,
+    ) -> ngtcp2_ssize;
     pub fn ngtcp2_conn_get_expiry(conn: *mut ngtcp2_conn) -> ngtcp2_tstamp;
     pub fn ngtcp2_conn_open_bidi_stream(
         conn: *mut ngtcp2_conn,

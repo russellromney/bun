@@ -138,6 +138,9 @@ pub struct QuicEndpoint {
     /// between). pub(crate): the timer-fire dispatch recovers the endpoint via
     /// `from_field_ptr!`, which needs `offset_of!` visibility.
     pub(crate) event_loop_timer: JsCell<EventLoopTimer>,
+    /// Keying material for the address-validation tokens this endpoint hands
+    /// out in NEW_TOKEN frames.
+    token_secret: [u8; 32],
 }
 
 bun_event_loop::impl_timer_owner!(QuicEndpoint; from_timer_ptr => event_loop_timer);
@@ -290,6 +293,12 @@ impl QuicEndpoint {
             global: Cell::new(core::ptr::from_ref(global)),
             sessions: JsCell::new(HashMap::new()),
             event_loop_timer: JsCell::new(EventLoopTimer::init_paused(EventLoopTimerTag::QuicEndpoint)),
+            token_secret: {
+                let mut secret = [0u8; 32];
+                // SAFETY: writes exactly 32 bytes into the stack buffer.
+                unsafe { bun_boringssl_sys::RAND_bytes(secret.as_mut_ptr(), secret.len()) };
+                secret
+            },
         };
         endpoint.write_stat(IDX_STATS_CREATED_AT, now_ns());
 
@@ -400,6 +409,11 @@ impl QuicEndpoint {
             _ => return StoredAddr::default(),
         };
         StoredAddr::from_socket_address(&addr)
+    }
+
+    /// Keying material for address-validation tokens.
+    pub(super) fn token_secret(&self) -> &[u8; 32] {
+        &self.token_secret
     }
 
     /// Transmit one QUIC packet to `dest` on the endpoint's UDP socket.
@@ -538,7 +552,7 @@ impl QuicEndpoint {
         if self.closed.get() {
             return Err(global.throw(format_args!("Endpoint is closed")));
         }
-        let [address, options, _session_ticket] = frame.arguments_as_array::<3>();
+        let [address, options, session_ticket] = frame.arguments_as_array::<3>();
 
         let Some(remote) = crate::generated_classes::js_SocketAddress::from_js(address) else {
             return Err(global.throw(format_args!("Expected a SocketAddress to connect to")));
@@ -557,6 +571,7 @@ impl QuicEndpoint {
             self.local_stored_addr(),
             remote,
             options,
+            session_ticket,
         )?;
         self.add_stat(IDX_STATS_CLIENT_SESSIONS, 1);
         Ok(handle)
