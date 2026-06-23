@@ -755,7 +755,7 @@ function TLSSocket(socket?, options?) {
   this[ksession] = undefined;
   this.alpnProtocol = null;
   this._secureEstablished = false;
-  this._rejectUnauthorized = rejectUnauthorizedDefault();
+  this._rejectUnauthorized = false;
   this._securePending = true;
   this._newSessionPending = undefined;
   this._controlReleased = undefined;
@@ -778,6 +778,12 @@ function TLSSocket(socket?, options?) {
   }
 
   options = isNetSocketOrDuplex ? { ...options, allowHalfOpen: false } : options || socket || {};
+
+  // A directly-constructed TLSSocket only rejects unauthorized peers when the
+  // caller asked for it: Node's _init uses `!!options.rejectUnauthorized` here,
+  // and the secure-by-default `rejectUnauthorized !== false` rule is applied by
+  // tls.connect() / tls.Server, which re-derive this field from their options.
+  this._rejectUnauthorized = !!options.rejectUnauthorized;
 
   NetSocket.$call(this, options);
 
