@@ -1918,34 +1918,19 @@ impl UDPSocket {
 // type check, and cluster-shared sockets. POSIX-only; Windows reports ENOTSUP,
 // matching Node's cluster behavior for shared dgram handles.
 
+/// Descriptors created by `js_dgram_new_socket_fd` and not yet closed. The
+/// helpers that mutate or close a descriptor refuse anything this module did
+/// not create, so builtin JS cannot be tricked into operating on an unrelated
+/// descriptor. A mutex because each worker thread has its own JS thread in the
+/// same process; the set stays tiny so a Vec scan is enough.
 #[cfg(not(windows))]
-fn dgram_owned_fds() -> &'static std::sync::Mutex<std::collections::HashSet<c_int>> {
-    // Descriptors created by `js_dgram_new_socket_fd` and not yet closed. The
-    // helpers that mutate or close a descriptor refuse anything this module
-    // did not create, so builtin JS cannot be tricked into operating on an
-    // unrelated descriptor. A Mutex because each worker thread has its own JS
-    // thread in the same process.
-    static OWNED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<c_int>>> =
-        std::sync::OnceLock::new();
-    OWNED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
-}
+static DGRAM_OWNED_FDS: bun_threading::Guarded<Vec<c_int>> =
+    bun_threading::Guarded::new(Vec::new());
 
 #[cfg(not(windows))]
 fn dgram_owned_fd_arg(global: &JSGlobalObject, value: JSValue) -> JsResult<c_int> {
-    let fd = dgram_fd_arg(global, value)?;
-    if !dgram_owned_fds().lock().unwrap().contains(&fd) {
-        return Err(global.throw_value(
-            bun_sys::Error::from_code_int(SystemErrno::EBADF as c_int, bun_sys::Tag::open)
-                .to_js(global),
-        ));
-    }
-    Ok(fd)
-}
-
-#[cfg(not(windows))]
-fn dgram_fd_arg(global: &JSGlobalObject, value: JSValue) -> JsResult<c_int> {
     let fd = value.coerce_to_i32(global)?;
-    if fd < 0 {
+    if fd < 0 || !DGRAM_OWNED_FDS.lock().contains(&fd) {
         return Err(global.throw_value(
             bun_sys::Error::from_code_int(SystemErrno::EBADF as c_int, bun_sys::Tag::open)
                 .to_js(global),
@@ -1976,6 +1961,12 @@ pub fn js_dgram_new_socket_fd(global: &JSGlobalObject, frame: &CallFrame) -> JsR
         } else {
             libc::SOCK_DGRAM
         };
+
+        // Apple has no SOCK_CLOEXEC/SOCK_NONBLOCK; set both via fcntl below.
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        // SAFETY: plain socket(2); no pointers involved.
+        let fd = unsafe { libc::socket(domain, sock_type, 0) };
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         // SAFETY: plain socket(2); no pointers involved.
         let fd = unsafe {
             libc::socket(
@@ -1988,7 +1979,16 @@ pub fn js_dgram_new_socket_fd(global: &JSGlobalObject, frame: &CallFrame) -> JsR
             let err = bun_sys::Error::from_code_int(bun_sys::last_errno(), bun_sys::Tag::open);
             return Err(global.throw_value(err.to_js(global)));
         }
-        dgram_owned_fds().lock().unwrap().insert(fd);
+
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        // SAFETY: fcntl(2) on the descriptor created above.
+        unsafe {
+            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+
+        DGRAM_OWNED_FDS.lock().push(fd);
         Ok(JSValue::js_number_from_int32(fd))
     }
     #[cfg(windows)]
@@ -1998,8 +1998,9 @@ pub fn js_dgram_new_socket_fd(global: &JSGlobalObject, frame: &CallFrame) -> JsR
     }
 }
 
-/// `(fd, address, port, flags)` → binds a raw datagram descriptor. `address`
-/// must be a numeric IPv4/IPv6 literal. flags bit 4 is UV_UDP_REUSEADDR.
+/// `(fd, address, port, flags)` → binds a raw datagram descriptor created by
+/// `js_dgram_new_socket_fd`. `address` must be a numeric IPv4/IPv6 literal.
+/// flags bit 4 is UV_UDP_REUSEADDR.
 #[bun_jsc::host_fn]
 pub fn js_dgram_bind_fd(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
     #[cfg(not(windows))]
@@ -2015,47 +2016,47 @@ pub fn js_dgram_bind_fd(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<
         };
         let flags = frame.argument(3).coerce_to_i32(global)?;
 
-        let einval = || {
-            global.throw_value(
-                bun_sys::Error::from_code_int(SystemErrno::EINVAL as c_int, bun_sys::Tag::bind2)
-                    .to_js(global),
-            )
-        };
-
         // Numeric literals only — the JS layer resolves names before calling.
         let mut storage: sockaddr_storage = bun_core::ffi::zeroed();
-        let mut socklen: libc::socklen_t;
+        let socklen: libc::socklen_t;
         // SAFETY: storage is large enough for sockaddr_in; src is NUL-terminated.
         let addr4 = unsafe { &mut *std::ptr::from_mut(&mut storage).cast::<sockaddr_in>() };
-        if unsafe {
+        // SAFETY: libc addr-format fn; src is NUL-terminated, dst points to in_addr-sized storage.
+        let parsed_v4 = unsafe {
             inet_pton(
                 inet::AF_INET as c_int,
                 address_z.as_ptr(),
                 (&raw mut addr4.addr).cast::<c_void>(),
             )
-        } == 1
-        {
+        };
+        if parsed_v4 == 1 {
             addr4.family = inet::AF_INET as inet::sa_family_t;
             addr4.port = htons(port);
             socklen = size_of::<sockaddr_in>() as libc::socklen_t;
         } else {
-            // SAFETY: storage is large enough for sockaddr_in6; src is NUL-terminated.
+            // SAFETY: storage is large enough for sockaddr_in6.
             let addr6 = unsafe { &mut *std::ptr::from_mut(&mut storage).cast::<sockaddr_in6>() };
-            if unsafe {
+            // SAFETY: libc addr-format fn; src is NUL-terminated, dst points to in6_addr-sized storage.
+            let parsed_v6 = unsafe {
                 inet_pton(
                     inet::AF_INET6 as c_int,
                     address_z.as_ptr(),
                     (&raw mut addr6.addr).cast::<c_void>(),
                 )
-            } != 1
-            {
-                return Err(einval());
+            };
+            if parsed_v6 != 1 {
+                return Err(global.throw_value(
+                    bun_sys::Error::from_code_int(
+                        SystemErrno::EINVAL as c_int,
+                        bun_sys::Tag::bind2,
+                    )
+                    .to_js(global),
+                ));
             }
             addr6.family = inet::AF_INET6 as inet::sa_family_t;
             addr6.port = htons(port);
             socklen = size_of::<sockaddr_in6>() as libc::socklen_t;
         }
-        let _ = &mut socklen;
 
         // UV_UDP_REUSEADDR — SO_REUSEADDR on Linux, SO_REUSEPORT where that is
         // what actually allows rebinding (matches libuv).
@@ -2082,7 +2083,7 @@ pub fn js_dgram_bind_fd(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<
             }
         }
 
-        // SAFETY: bind(2); storage was fully initialized above for socklen bytes.
+        // SAFETY: bind(2); storage was initialized above for socklen bytes.
         let rc = unsafe { libc::bind(fd, std::ptr::from_ref(&storage).cast(), socklen) };
         if rc != 0 {
             let err = bun_sys::Error::from_code_int(bun_sys::last_errno(), bun_sys::Tag::bind2);
@@ -2097,7 +2098,8 @@ pub fn js_dgram_bind_fd(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<
     }
 }
 
-/// `(fd)` → `{ address, port, family }` of a raw descriptor's local address.
+/// `(fd)` → `{ address, port, family }` of an owned raw descriptor's local
+/// address.
 #[bun_jsc::host_fn]
 pub fn js_dgram_get_sock_name_fd(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
     #[cfg(not(windows))]
@@ -2106,15 +2108,20 @@ pub fn js_dgram_get_sock_name_fd(global: &JSGlobalObject, frame: &CallFrame) -> 
         let mut storage: sockaddr_storage = bun_core::ffi::zeroed();
         let mut len = size_of::<sockaddr_storage>() as libc::socklen_t;
         // SAFETY: getsockname(2) writes at most `len` bytes into storage.
-        let rc =
-            unsafe { libc::getsockname(fd, std::ptr::from_mut(&mut storage).cast(), &mut len) };
+        let rc = unsafe {
+            libc::getsockname(
+                fd,
+                std::ptr::from_mut(&mut storage).cast(),
+                std::ptr::from_mut(&mut len),
+            )
+        };
         if rc != 0 {
             let err = bun_sys::Error::from_code_int(bun_sys::last_errno(), bun_sys::Tag::open);
             return Err(global.throw_value(err.to_js(global)));
         }
         let (bytes, port): (&[u8], u16) = if storage.ss_family == inet::AF_INET as libc::sa_family_t
         {
-            // SAFETY: family says this is a sockaddr_in.
+            // SAFETY: the family says this is a sockaddr_in.
             let addr4 = unsafe { &*std::ptr::from_ref(&storage).cast::<sockaddr_in>() };
             (
                 // SAFETY: in_addr is 4 bytes.
@@ -2122,7 +2129,7 @@ pub fn js_dgram_get_sock_name_fd(global: &JSGlobalObject, frame: &CallFrame) -> 
                 u16::from_be(addr4.port),
             )
         } else if storage.ss_family == inet::AF_INET6 as libc::sa_family_t {
-            // SAFETY: family says this is a sockaddr_in6.
+            // SAFETY: the family says this is a sockaddr_in6.
             let addr6 = unsafe { &*std::ptr::from_ref(&storage).cast::<sockaddr_in6>() };
             (
                 // SAFETY: in6_addr is 16 bytes.
@@ -2148,77 +2155,73 @@ pub fn js_dgram_get_sock_name_fd(global: &JSGlobalObject, frame: &CallFrame) -> 
 /// `guessHandleType`. Never throws.
 #[bun_jsc::host_fn]
 pub fn js_dgram_guess_handle_type(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
+    #[cfg(windows)]
+    let kind: &'static str = {
+        let _ = frame;
+        "UNKNOWN"
+    };
+    #[cfg(not(windows))]
     let kind: &'static str = 'kind: {
-        #[cfg(not(windows))]
-        {
-            let fd = frame.argument(0).coerce_to_i32(global)?;
-            if fd < 0 {
+        let fd = frame.argument(0).coerce_to_i32(global)?;
+        if fd < 0 {
+            break 'kind "UNKNOWN";
+        }
+        let mut st: libc::stat = bun_core::ffi::zeroed();
+        // SAFETY: fstat(2) with a zeroed out-param.
+        let rc = unsafe { libc::fstat(fd, std::ptr::from_mut(&mut st)) };
+        if rc != 0 {
+            break 'kind "UNKNOWN";
+        }
+        let mode = st.st_mode & libc::S_IFMT;
+        if mode == libc::S_IFSOCK {
+            let mut sock_type: c_int = 0;
+            let mut len = size_of::<c_int>() as libc::socklen_t;
+            // SAFETY: getsockopt(2) writes an int into sock_type.
+            let rc = unsafe {
+                libc::getsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_TYPE,
+                    std::ptr::from_mut(&mut sock_type).cast::<c_void>(),
+                    std::ptr::from_mut(&mut len),
+                )
+            };
+            if rc != 0 {
                 break 'kind "UNKNOWN";
             }
-            // SAFETY: fstat(2) with a zeroed out-param.
-            let mut st: libc::stat = bun_core::ffi::zeroed();
-            if unsafe { libc::fstat(fd, &mut st) } != 0 {
+            let mut storage: sockaddr_storage = bun_core::ffi::zeroed();
+            let mut slen = size_of::<sockaddr_storage>() as libc::socklen_t;
+            // SAFETY: getsockname(2) writes at most slen bytes into storage.
+            let rc = unsafe {
+                libc::getsockname(
+                    fd,
+                    std::ptr::from_mut(&mut storage).cast(),
+                    std::ptr::from_mut(&mut slen),
+                )
+            };
+            if rc != 0 {
                 break 'kind "UNKNOWN";
             }
-            let mode = st.st_mode & libc::S_IFMT;
-            if mode == libc::S_IFSOCK {
-                let mut sock_type: c_int = 0;
-                let mut len = size_of::<c_int>() as libc::socklen_t;
-                // SAFETY: getsockopt(2) writes an int.
-                if unsafe {
-                    libc::getsockopt(
-                        fd,
-                        libc::SOL_SOCKET,
-                        libc::SO_TYPE,
-                        (&raw mut sock_type).cast::<c_void>(),
-                        &mut len,
-                    )
-                } != 0
-                {
-                    break 'kind "UNKNOWN";
-                }
-                let mut storage: sockaddr_storage = bun_core::ffi::zeroed();
-                let mut slen = size_of::<sockaddr_storage>() as libc::socklen_t;
-                // SAFETY: getsockname(2) writes at most slen bytes.
-                if unsafe {
-                    libc::getsockname(fd, std::ptr::from_mut(&mut storage).cast(), &mut slen)
-                } != 0
-                {
-                    break 'kind "UNKNOWN";
-                }
-                let family = storage.ss_family as c_int;
-                break 'kind match sock_type {
-                    libc::SOCK_DGRAM if family == libc::AF_INET || family == libc::AF_INET6 => {
-                        "UDP"
-                    }
-                    libc::SOCK_STREAM if family == libc::AF_INET || family == libc::AF_INET6 => {
-                        "TCP"
-                    }
-                    libc::SOCK_STREAM if family == libc::AF_UNIX => "PIPE",
-                    _ => "UNKNOWN",
-                };
-            }
-            if mode == libc::S_IFIFO {
-                break 'kind "PIPE";
-            }
-            if mode == libc::S_IFCHR {
-                // SAFETY: isatty(3) on a valid fd.
-                break 'kind if unsafe { libc::isatty(fd) } == 1 {
-                    "TTY"
-                } else {
-                    "FILE"
-                };
-            }
-            if mode == libc::S_IFREG {
-                break 'kind "FILE";
-            }
-            "UNKNOWN"
+            let family = storage.ss_family as c_int;
+            break 'kind match sock_type {
+                libc::SOCK_DGRAM if family == libc::AF_INET || family == libc::AF_INET6 => "UDP",
+                libc::SOCK_STREAM if family == libc::AF_INET || family == libc::AF_INET6 => "TCP",
+                libc::SOCK_STREAM if family == libc::AF_UNIX => "PIPE",
+                _ => "UNKNOWN",
+            };
         }
-        #[cfg(windows)]
-        {
-            let _ = frame;
-            "UNKNOWN"
+        if mode == libc::S_IFIFO {
+            break 'kind "PIPE";
         }
+        if mode == libc::S_IFCHR {
+            // SAFETY: isatty(3) on a non-negative fd.
+            let is_tty = unsafe { libc::isatty(fd) } == 1;
+            break 'kind if is_tty { "TTY" } else { "FILE" };
+        }
+        if mode == libc::S_IFREG {
+            break 'kind "FILE";
+        }
+        "UNKNOWN"
     };
     BunString::static_(kind.as_bytes()).to_js(global)
 }
@@ -2231,7 +2234,8 @@ pub fn js_dgram_listen_fd(global: &JSGlobalObject, frame: &CallFrame) -> JsResul
     {
         let fd = dgram_owned_fd_arg(global, frame.argument(0))?;
         // SAFETY: listen(2) on a descriptor this module created.
-        if unsafe { libc::listen(fd, 511) } != 0 {
+        let rc = unsafe { libc::listen(fd, 511) };
+        if rc != 0 {
             let err = bun_sys::Error::from_code_int(bun_sys::last_errno(), bun_sys::Tag::listen);
             return Err(global.throw_value(err.to_js(global)));
         }
@@ -2250,7 +2254,17 @@ pub fn js_dgram_close_fd(global: &JSGlobalObject, frame: &CallFrame) -> JsResult
     #[cfg(not(windows))]
     {
         let fd = frame.argument(0).coerce_to_i32(global)?;
-        if fd >= 0 && dgram_owned_fds().lock().unwrap().remove(&fd) {
+        let owned = {
+            let mut owned_fds = DGRAM_OWNED_FDS.lock();
+            match owned_fds.iter().position(|&owned_fd| owned_fd == fd) {
+                Some(index) => {
+                    owned_fds.swap_remove(index);
+                    true
+                }
+                None => false,
+            }
+        };
+        if owned {
             // SAFETY: close(2) on a descriptor this module created and still owned.
             unsafe { libc::close(fd) };
         }
