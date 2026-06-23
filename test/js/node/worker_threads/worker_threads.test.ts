@@ -667,26 +667,38 @@ test("worker.performance.eventLoopUtilization() returns zeros (not negatives) af
   using dir = tempDir("wt-elu-exit", {
     "worker.mjs": `
       import { parentPort } from "worker_threads";
+      let notified = false;
       (function busy() {
         const t = Date.now();
         while (Date.now() - t < 20);
+        // Signal once the loop has accumulated active time, so the parent waits
+        // on an observable condition instead of a fixed delay.
+        if (!notified) {
+          notified = true;
+          parentPort.postMessage("busy");
+        }
         setImmediate(busy);
       })();
     `,
   });
 
   const worker = new Worker(join(String(dir), "worker.mjs"));
-  await new Promise<void>((resolve, reject) => {
-    worker.on("online", () => resolve());
-    worker.on("error", reject);
-  });
-  await Bun.sleep(50);
-  const elu1 = worker.performance.eventLoopUtilization();
-  expect(elu1.active).toBeGreaterThan(0);
+  let terminated = false;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      worker.once("message", () => resolve());
+      worker.once("error", reject);
+    });
+    const elu1 = worker.performance.eventLoopUtilization();
+    expect(elu1.active).toBeGreaterThan(0);
 
-  await worker.terminate();
+    await worker.terminate();
+    terminated = true;
 
-  // Sampling against a prior snapshot after the worker has exited must not
-  // produce negative deltas; Node returns zeros and ignores the prior sample.
-  expect(worker.performance.eventLoopUtilization(elu1)).toEqual({ idle: 0, active: 0, utilization: 0 });
+    // Sampling against a prior snapshot after the worker has exited must not
+    // produce negative deltas; Node returns zeros and ignores the prior sample.
+    expect(worker.performance.eventLoopUtilization(elu1)).toEqual({ idle: 0, active: 0, utilization: 0 });
+  } finally {
+    if (!terminated) await worker.terminate();
+  }
 });
