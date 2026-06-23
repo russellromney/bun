@@ -252,13 +252,16 @@ unsafe extern "C" fn rand_cb(dest: *mut u8, destlen: usize, _rand_ctx: *const ng
     unsafe { ssl::RAND_bytes(dest, destlen) };
 }
 
-/// `ngtcp2_callbacks.get_new_connection_id`.
+/// `ngtcp2_callbacks.get_new_connection_id`. Every connection ID handed to
+/// ngtcp2 (and advertised to the peer in NEW_CONNECTION_ID frames) must also
+/// be registered with the endpoint's routing map: the peer is free to switch
+/// to any of them at any time.
 unsafe extern "C" fn get_new_connection_id_cb(
     _conn: *mut ngtcp2::ngtcp2_conn,
     cid: *mut ngtcp2::ngtcp2_cid,
     token: *mut u8,
     cidlen: usize,
-    _user_data: *mut c_void,
+    user_data: *mut c_void,
 ) -> c_int {
     // SAFETY: ngtcp2 provides a cid out-param and a token buffer of
     // NGTCP2_STATELESS_RESET_TOKENLEN bytes.
@@ -271,6 +274,54 @@ unsafe extern "C" fn get_new_connection_id_cb(
         if !token.is_null() && ssl::RAND_bytes(token, ngtcp2::NGTCP2_STATELESS_RESET_TOKENLEN) != 1 {
             return -1;
         }
+        if !user_data.is_null() {
+            // SAFETY: `user_data` is the owning QuicSession; pure map updates,
+            // no JS.
+            let session = &*user_data.cast::<QuicSession>();
+            let endpoint = session.endpoint.get();
+            if !endpoint.is_null() {
+                // Copy out of the raw out-param before borrowing as a slice.
+                let mut cid_bytes = [0u8; ngtcp2::NGTCP2_MAX_CIDLEN];
+                core::ptr::copy_nonoverlapping(
+                    (&raw const (*cid).data).cast::<u8>(),
+                    cid_bytes.as_mut_ptr(),
+                    cidlen,
+                );
+                let bytes = &cid_bytes[..cidlen];
+                (*endpoint).register_session_cid(bytes, user_data.cast::<QuicSession>());
+                session.registered_cids.with_mut(|cids| cids.push(bytes.to_vec()));
+            }
+        }
+    }
+    0
+}
+
+/// `ngtcp2_callbacks.remove_connection_id` — the peer retired one of our
+/// connection IDs; stop routing it.
+unsafe extern "C" fn remove_connection_id_cb(
+    _conn: *mut ngtcp2::ngtcp2_conn,
+    cid: *const ngtcp2::ngtcp2_cid,
+    user_data: *mut c_void,
+) -> c_int {
+    if user_data.is_null() || cid.is_null() {
+        return 0;
+    }
+    // SAFETY: `user_data` is the owning QuicSession; `cid` points at a live
+    // ngtcp2_cid for the duration of the callback.
+    unsafe {
+        let session = &*user_data.cast::<QuicSession>();
+        let endpoint = session.endpoint.get();
+        let len = (*cid).datalen.min(ngtcp2::NGTCP2_MAX_CIDLEN);
+        // Copy out of the raw pointer before borrowing as a slice.
+        let mut cid_bytes = [0u8; ngtcp2::NGTCP2_MAX_CIDLEN];
+        core::ptr::copy_nonoverlapping((&raw const (*cid).data).cast::<u8>(), cid_bytes.as_mut_ptr(), len);
+        let bytes = &cid_bytes[..len];
+        if !endpoint.is_null() {
+            (*endpoint).unregister_session_cid(bytes);
+        }
+        session
+            .registered_cids
+            .with_mut(|cids| cids.retain(|existing| existing != bytes));
     }
     0
 }
@@ -439,6 +490,7 @@ fn build_callbacks(is_server: bool) -> ngtcp2::ngtcp2_callbacks {
     cb.version_negotiation = Some(ngtcp2::ngtcp2_crypto_version_negotiation_cb);
     cb.rand = Some(rand_cb);
     cb.get_new_connection_id = Some(get_new_connection_id_cb);
+    cb.remove_connection_id = Some(remove_connection_id_cb);
     cb.stream_open = Some(stream_open_cb);
     cb.recv_stream_data = Some(recv_stream_data_cb);
     cb.stream_close = Some(stream_close_cb);
@@ -458,6 +510,77 @@ fn random_cid(len: usize) -> ngtcp2::ngtcp2_cid {
     unsafe { ssl::RAND_bytes(cid.data.as_mut_ptr(), len) };
     cid.datalen = len;
     cid
+}
+
+/// Largest DATAGRAM payload that fits a frame of `max_frame_size` bytes
+/// (frame type byte + length varint + payload), mirroring Node's
+/// MaxDatagramPayload (node/src/quic/session.cc).
+fn max_datagram_payload(max_frame_size: u64) -> u64 {
+    if max_frame_size < 2 {
+        return 0;
+    }
+    fn varint_len(n: u64) -> u64 {
+        if n < 64 {
+            1
+        } else if n < 16384 {
+            2
+        } else if n < 1_073_741_824 {
+            4
+        } else {
+            8
+        }
+    }
+    let payload = max_frame_size - 2;
+    let overhead = 1 + varint_len(payload);
+    if overhead + payload > max_frame_size {
+        return max_frame_size - 1 - varint_len(max_frame_size - 3);
+    }
+    payload
+}
+
+/// Validate `options.transportParams` the way Node's TransportParams::From
+/// does: every present field must be a non-negative integer within the
+/// field's range, otherwise the listen()/connect() call rejects with
+/// ERR_INVALID_ARG_VALUE.
+pub(super) fn validate_transport_params(global: &JSGlobalObject, options: JSValue) -> JsResult<()> {
+    if !options.is_object() {
+        return Ok(());
+    }
+    let Some(tp) = options.get(global, "transportParams")?.filter(|v| v.is_object()) else {
+        return Ok(());
+    };
+    const FIELDS: &[(&str, u64)] = &[
+        ("initialMaxStreamDataBidiLocal", u64::MAX),
+        ("initialMaxStreamDataBidiRemote", u64::MAX),
+        ("initialMaxStreamDataUni", u64::MAX),
+        ("initialMaxData", u64::MAX),
+        ("initialMaxStreamsBidi", u64::MAX),
+        ("initialMaxStreamsUni", u64::MAX),
+        ("maxIdleTimeout", u64::MAX),
+        ("activeConnectionIDLimit", 8),
+        ("ackDelayExponent", 20),
+        ("maxAckDelay", u64::MAX),
+        ("maxDatagramFrameSize", 65535),
+    ];
+    for &(name, max) in FIELDS {
+        let Some(value) = tp.get(global, name)? else { continue };
+        if value.is_undefined() {
+            continue;
+        }
+        let valid = value.is_number() && {
+            let n = value.as_number();
+            n.is_finite() && n >= 0.0 && n.fract() == 0.0 && n <= max as f64
+        };
+        if !valid {
+            return Err(global
+                .err(
+                    bun_jsc::ErrorCode::INVALID_ARG_VALUE,
+                    format_args!("The property 'options.transportParams.{name}' is invalid"),
+                )
+                .throw());
+        }
+    }
+    Ok(())
 }
 
 fn read_u64_option(global: &JSGlobalObject, options: JSValue, name: &str) -> JsResult<Option<u64>> {
@@ -502,6 +625,8 @@ pub struct QuicSession {
     /// Datagrams queued by `sendDatagram`, written by the flush loop.
     datagram_queue: JsCell<std::collections::VecDeque<(u64, Box<[u8]>)>>,
     next_datagram_id: Cell<u64>,
+    /// `datagramDropPolicy: 'drop-newest'` (default is drop-oldest).
+    datagram_drop_newest: Cell<bool>,
     /// The realm this session was created in (JS-thread only; outlives the
     /// session).
     global: Cell<*const JSGlobalObject>,
@@ -576,6 +701,7 @@ impl QuicSession {
             stream_events: JsCell::new(Vec::new()),
             datagram_queue: JsCell::new(std::collections::VecDeque::new()),
             next_datagram_id: Cell::new(1),
+            datagram_drop_newest: Cell::new(false),
             global: Cell::new(core::ptr::from_ref(global)),
             event_loop_timer: JsCell::new(EventLoopTimer::init_paused(EventLoopTimerTag::QuicSession)),
             handshake_reported: Cell::new(false),
@@ -731,6 +857,7 @@ impl QuicSession {
         remote_addr: StoredAddr,
         options: JSValue,
     ) -> JsResult<JSValue> {
+        validate_transport_params(global, options)?;
         let (raw, handle) = Self::create_shell(global, endpoint, endpoint_handle, local_addr, remote_addr)?;
         // SAFETY: freshly created, uniquely referenced here; wrapper owns it.
         let this = unsafe { &*raw };
@@ -741,6 +868,7 @@ impl QuicSession {
             JSValue::UNDEFINED
         };
         let tls_config = TlsConfig::from_js(global, tls_options, false)?;
+        this.apply_datagram_options(global, options)?;
 
         let mut conn_ref = Box::new(ngtcp2::ngtcp2_crypto_conn_ref {
             get_conn: Some(get_conn_from_ref),
@@ -842,6 +970,7 @@ impl QuicSession {
             JSValue::UNDEFINED
         };
         let tls_config = TlsConfig::from_js(global, tls_options, true)?;
+        this.apply_datagram_options(global, options)?;
 
         let mut conn_ref = Box::new(ngtcp2::ngtcp2_crypto_conn_ref {
             get_conn: Some(get_conn_from_ref),
@@ -1491,8 +1620,8 @@ impl QuicSession {
             (*self.state_mut()).stream_open_allowed = 1;
         }
         // The negotiated datagram limit comes from the peer's transport
-        // params (0 = peer does not accept DATAGRAM frames), capped by what
-        // fits in a single packet.
+        // params (0 = peer does not accept DATAGRAM frames), reduced by the
+        // DATAGRAM frame header overhead.
         // SAFETY: `conn` is live; the returned params are conn-owned.
         let remote_mdfs = unsafe {
             let params = ngtcp2::ngtcp2_conn_get_remote_transport_params(self.conn.get());
@@ -1501,7 +1630,7 @@ impl QuicSession {
         // SAFETY: state buffer is live while the wrapper is.
         unsafe {
             (*self.state_mut()).max_datagram_size =
-                remote_mdfs.min(ngtcp2::NGTCP2_MAX_UDP_PAYLOAD_SIZE as u64) as u16;
+                max_datagram_payload(remote_mdfs).min(u64::from(u16::MAX)) as u16;
         }
 
         let tls_guard = self.tls.get();
@@ -1644,6 +1773,37 @@ impl QuicSession {
     ) {
         if self.close_reported.replace(true) || self.destroyed.get() {
             return;
+        }
+        // Datagrams still queued when the session closes are never sent;
+        // report them as abandoned (gated on the registered listener).
+        let abandoned: Vec<u64> = self
+            .datagram_queue
+            .replace(std::collections::VecDeque::new())
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        // SAFETY: state buffer is live while the wrapper is.
+        let wants_status =
+            unsafe { (*self.state_mut()).listener_flags } & LISTENER_FLAG_DATAGRAM_STATUS != 0;
+        if wants_status && !abandoned.is_empty() {
+            if let Some(callback) = callbacks::get(global, "onSessionDatagramStatus") {
+                for id in abandoned {
+                    if self.destroyed.get() {
+                        break;
+                    }
+                    // Recreated per call: nothing roots it across the JS calls.
+                    let status = bun_core::String::static_(b"abandoned")
+                        .to_js(global)
+                        .unwrap_or(JSValue::UNDEFINED);
+                    let vm = global.bun_vm().as_mut();
+                    vm.event_loop_ref().run_callback(
+                        callback,
+                        global,
+                        self.handle(),
+                        &[JSValue::from_uint64_no_truncate(global, id), status],
+                    );
+                }
+            }
         }
         self.write_stat(IDX_STATS_CLOSING_AT, now_ns());
         // SAFETY: state buffer is live while the wrapper is.
@@ -1952,7 +2112,10 @@ impl QuicSession {
     }
 
     /// `sendDatagram(view)` — queue an unreliable datagram; returns its id as
-    /// a BigInt (0n when it could not be queued). Size/support checks live in JS.
+    /// a BigInt (0n when it could not be queued). Size/support checks live in
+    /// JS. Transmission happens on the next event-loop turn (Node defers it
+    /// the same way), so rapid sends can overflow the pending queue and the
+    /// drop policy decides which datagram is abandoned.
     pub(crate) fn send_datagram(&self, global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
         if self.destroyed.get() || self.conn.get().is_null() {
             return Ok(JSValue::from_uint64_no_truncate(global, 0));
@@ -1964,13 +2127,72 @@ impl QuicSession {
         let bytes: Box<[u8]> = buf.byte_slice().to_vec().into_boxed_slice();
         let id = self.next_datagram_id.get();
         self.next_datagram_id.set(id + 1);
-        self.datagram_queue.with_mut(|queue| queue.push_back((id, bytes)));
+        // SAFETY: state buffer is live while the wrapper is.
+        let max_pending = unsafe { (*self.state_mut()).max_pending_datagrams } as usize;
+
+        let mut abandoned: Option<u64> = None;
+        let queue_len = self.datagram_queue.get().len();
+        if max_pending > 0 && queue_len >= max_pending {
+            if self.datagram_drop_newest.get() {
+                // The new datagram is the one dropped.
+                abandoned = Some(id);
+            } else {
+                abandoned = self.datagram_queue.with_mut(|queue| queue.pop_front().map(|(old, _)| old));
+                self.datagram_queue.with_mut(|queue| queue.push_back((id, bytes)));
+            }
+        } else {
+            self.datagram_queue.with_mut(|queue| queue.push_back((id, bytes)));
+        }
         // SAFETY: state buffer is live while the wrapper is.
         unsafe { (*self.state_mut()).last_datagram_id = id };
-        self.flush(global);
-        self.schedule_event_dispatch();
-        self.rearm_timer();
+
+        if let Some(abandoned_id) = abandoned {
+            self.report_datagram_status(global, abandoned_id, "abandoned");
+        }
+
+        // Send on the next turn.
+        let next = bun_core::Timespec::ms_from_now(bun_core::TimespecMockMode::ForceRealTime, 1);
+        // SAFETY: `event_loop_timer` is the live inline timer field of this
+        // heap-allocated session.
+        timer_all().update(self.event_loop_timer.as_ptr(), &next);
         Ok(JSValue::from_uint64_no_truncate(global, id))
+    }
+
+    /// Pick up the datagram-related session options.
+    fn apply_datagram_options(&self, global: &JSGlobalObject, options: JSValue) -> JsResult<()> {
+        if !options.is_object() {
+            return Ok(());
+        }
+        if let Some(policy) = options.get(global, "datagramDropPolicy")?.filter(|v| v.is_string()) {
+            let policy = bun_core::String::from_js(policy, global)?.to_utf8_bytes();
+            self.datagram_drop_newest.set(policy.as_slice() == b"drop-newest");
+        }
+        Ok(())
+    }
+
+    /// Deliver one `onSessionDatagramStatus(id, status)` callback (gated on
+    /// the registered listener).
+    fn report_datagram_status(&self, global: &JSGlobalObject, id: u64, status: &'static str) {
+        if self.destroyed.get() {
+            return;
+        }
+        // SAFETY: state buffer is live while the wrapper is.
+        let wants =
+            unsafe { (*self.state_mut()).listener_flags } & LISTENER_FLAG_DATAGRAM_STATUS != 0;
+        if !wants {
+            return;
+        }
+        let Some(callback) = callbacks::get(global, "onSessionDatagramStatus") else { return };
+        let status = bun_core::String::static_(status.as_bytes())
+            .to_js(global)
+            .unwrap_or(JSValue::UNDEFINED);
+        let vm = global.bun_vm().as_mut();
+        vm.event_loop_ref().run_callback(
+            callback,
+            global,
+            self.handle(),
+            &[JSValue::from_uint64_no_truncate(global, id), status],
+        );
     }
 
     /// Write queued DATAGRAM frames. Datagrams are fire-and-forget: ngtcp2

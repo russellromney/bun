@@ -368,6 +368,7 @@ impl QuicEndpoint {
             return Ok(JSValue::UNDEFINED);
         }
         let options = frame.arguments_as_array::<1>()[0];
+        super::session::validate_transport_params(global, options)?;
         // Keep the processed session options (TLS config for inbound sessions)
         // alive for the session phase.
         if options.is_object() {
