@@ -661,3 +661,32 @@ test("worker.performance.eventLoopUtilization() reports the worker's activity", 
     await worker.terminate();
   }
 });
+
+// https://github.com/oven-sh/bun/issues/32609
+test("worker.performance.eventLoopUtilization() returns zeros (not negatives) after the worker exits", async () => {
+  using dir = tempDir("wt-elu-exit", {
+    "worker.mjs": `
+      import { parentPort } from "worker_threads";
+      (function busy() {
+        const t = Date.now();
+        while (Date.now() - t < 20);
+        setImmediate(busy);
+      })();
+    `,
+  });
+
+  const worker = new Worker(join(String(dir), "worker.mjs"));
+  await new Promise<void>((resolve, reject) => {
+    worker.on("online", () => resolve());
+    worker.on("error", reject);
+  });
+  await Bun.sleep(50);
+  const elu1 = worker.performance.eventLoopUtilization();
+  expect(elu1.active).toBeGreaterThan(0);
+
+  await worker.terminate();
+
+  // Sampling against a prior snapshot after the worker has exited must not
+  // produce negative deltas; Node returns zeros and ignores the prior sample.
+  expect(worker.performance.eventLoopUtilization(elu1)).toEqual({ idle: 0, active: 0, utilization: 0 });
+});

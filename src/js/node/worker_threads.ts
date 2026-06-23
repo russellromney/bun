@@ -552,7 +552,15 @@ class Worker extends EventEmitter {
       const getRaw = () => this.#worker.eventLoopUtilization();
       this.#performance = {
         eventLoopUtilization(utilization1, utilization2) {
-          return computeEventLoopUtilization(getRaw, utilization1, utilization2);
+          const raw = getRaw();
+          // The native side returns { idle: 0, active: 0 } while the worker
+          // isn't running (not yet online, terminating, or exited). Match Node:
+          // return zeros and ignore the prior samples rather than producing
+          // negative deltas from `raw - utilization1`.
+          if (raw.idle === 0 && raw.active === 0) {
+            return { idle: 0, active: 0, utilization: 0 };
+          }
+          return computeEventLoopUtilization(() => raw, utilization1, utilization2);
         },
       };
     }
