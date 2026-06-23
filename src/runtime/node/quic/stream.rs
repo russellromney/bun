@@ -61,6 +61,8 @@ const IDX_STATS_OPENED_AT: usize = 1;
 const IDX_STATS_RECEIVED_AT: usize = 2;
 const IDX_STATS_DESTROYED_AT: usize = 4;
 const IDX_STATS_BYTES_RECEIVED: usize = 5;
+const IDX_STATS_BYTES_ACCUMULATED: usize = 11;
+const IDX_STATS_MAX_BYTES_ACCUMULATED: usize = 12;
 
 /// Default high-water mark for streaming outbound sources (matches the JS
 /// layer's kDefaultHighWaterMark).
@@ -231,11 +233,32 @@ impl QuicStream {
         if !data.is_empty() {
             self.add_stat(IDX_STATS_BYTES_RECEIVED, data.len() as u64);
             self.write_stat(IDX_STATS_RECEIVED_AT, super::now_ns());
+            // Track how much inbound data is buffered awaiting the reader.
+            let accumulated = self.read_stat(IDX_STATS_BYTES_ACCUMULATED) + data.len() as u64;
+            self.write_stat(IDX_STATS_BYTES_ACCUMULATED, accumulated);
+            self.write_stat(
+                IDX_STATS_MAX_BYTES_ACCUMULATED,
+                self.read_stat(IDX_STATS_MAX_BYTES_ACCUMULATED).max(accumulated),
+            );
         }
         if fin {
             // SAFETY: state buffer is live while the wrapper is.
             unsafe { (*self.state_mut()).fin_received = 1 };
         }
+    }
+
+    /// A locally-opened unidirectional stream has no readable side: the
+    /// reader reports end-of-stream right away.
+    pub(super) fn mark_local_unidirectional(&self) {
+        self.inbound.with_mut(|inbound| inbound.ended = true);
+        // SAFETY: state buffer is live while the wrapper is.
+        unsafe { (*self.state_mut()).read_ended = 1 };
+    }
+
+    /// A peer-opened unidirectional stream has no writable side.
+    pub(super) fn mark_remote_unidirectional(&self) {
+        // SAFETY: state buffer is live while the wrapper is.
+        unsafe { (*self.state_mut()).write_ended = 1 };
     }
 
     /// The peer reset the stream: discard pending inbound data and surface the
@@ -521,6 +544,10 @@ impl QuicStream {
                     // SAFETY: the session outlives its streams.
                     unsafe { (*session).extend_stream_offset(self.id.get(), bytes.len() as u64) };
                 }
+                self.write_stat(
+                    IDX_STATS_BYTES_ACCUMULATED,
+                    self.read_stat(IDX_STATS_BYTES_ACCUMULATED).saturating_sub(bytes.len() as u64),
+                );
                 ArrayBuffer::create::<{ JSType::ArrayBuffer }>(global, &bytes)?
             }
             None => JSValue::UNDEFINED,
@@ -539,14 +566,25 @@ impl QuicStream {
         if self.destroyed.get() {
             return Ok(JSValue::UNDEFINED);
         }
-        // An explicit destroy with a code resets the sending side and stops
-        // requesting data from the peer, like Node.
         let code = frame.arguments_as_array::<1>()[0];
         let code = if code.is_number() { code.as_number().max(0.0) as u64 } else { 0 };
-        let session = self.session.get();
-        if !session.is_null() {
-            // SAFETY: the session outlives its streams.
-            unsafe { (*session).shutdown_stream(global, self.id.get(), code) };
+        // Destroying a stream whose both sides already finished is plain
+        // teardown; only an abortive destroy (an unfinished side or an
+        // explicit error code) resets the sending side and stops the peer.
+        // SAFETY: state buffer is live while the wrapper is.
+        let (write_done, read_done) = unsafe {
+            let state = self.state_mut();
+            (
+                (*state).fin_sent != 0 || (*state).write_ended != 0,
+                (*state).fin_received != 0 || (*state).read_ended != 0 || (*state).reset != 0,
+            )
+        };
+        if code != 0 || !write_done || !read_done {
+            let session = self.session.get();
+            if !session.is_null() {
+                // SAFETY: the session outlives its streams.
+                unsafe { (*session).shutdown_stream(global, self.id.get(), code) };
+            }
         }
         self.teardown();
         Ok(JSValue::UNDEFINED)

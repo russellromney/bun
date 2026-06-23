@@ -1007,6 +1007,10 @@ impl QuicSession {
                         // Peer-initiated stream direction is derived from the
                         // id: bit 1 set means unidirectional.
                         let direction = if id & 0x2 != 0 { 1.0 } else { 0.0 };
+                        if id & 0x2 != 0 {
+                            // SAFETY: the stream was created above.
+                            unsafe { (*stream).mark_remote_unidirectional() };
+                        }
                         if let Some(callback) = callbacks::get(global, "onStreamCreated") {
                             let vm = global.bun_vm().as_mut();
                             vm.event_loop_ref().run_callback(
@@ -1695,6 +1699,10 @@ impl QuicSession {
         self.streams.with_mut(|map| {
             map.insert(stream_id, stream);
         });
+        if unidirectional {
+            // SAFETY: the stream was created above and is registered.
+            unsafe { (*stream).mark_local_unidirectional() };
+        }
 
         if !body.is_empty_or_undefined_or_null() {
             if let Some(buf) = body.as_array_buffer(global) {
