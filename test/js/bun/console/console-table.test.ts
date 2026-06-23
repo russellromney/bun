@@ -319,4 +319,20 @@ describe.concurrent("Node compatibility: index column header + alignment", () =>
     );
     expect(exitCode).toBe(0);
   });
+
+  // A WeakMap with an own (expando) property must render that property as a
+  // plain object, not take the Map "Key" column path: the index column has no
+  // "Key" column for a WeakMap, so the Map branch would index a missing column.
+  test("WeakMap with an own property renders as a plain object (no crash)", async () => {
+    const { stdout, exitCode } = await run(`const wm = new WeakMap(); wm.foo = 'bar'; console.table(wm);`);
+    expect(stdout).toBe(
+      `┌─────────┬────────┐
+│ (index) │ Values │
+├─────────┼────────┤
+│ foo     │ bar    │
+└─────────┴────────┘
+`,
+    );
+    expect(exitCode).toBe(0);
+  });
 });
