@@ -61,7 +61,9 @@ class BodyReadable extends ReadableFromWeb {
   constructor(response, options = {}) {
     var { body } = response;
     if (!body) throw new Error("Response body is null");
-    super(options, body);
+    // lazyReader: json()/text()/... below consume through the native Response,
+    // which must stay unlocked until the node-stream side is actually read.
+    super({ ...options, lazyReader: true }, body);
 
     this.#response = response;
     this.#bodyUsed = response.bodyUsed;

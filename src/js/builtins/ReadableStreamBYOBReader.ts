@@ -54,7 +54,8 @@ export function read(this, view: DataView) {
   if (!ArrayBuffer.$isView(view))
     return Promise.$reject($ERR_INVALID_ARG_TYPE("view", "Buffer, TypedArray, or DataView", view));
 
-  if (view.byteLength === 0) return Promise.$reject($makeTypeError("Provided view cannot have a 0 byteLength"));
+  if (view.byteLength === 0)
+    return Promise.$reject($ERR_INVALID_STATE_TypeError("Provided view cannot have a 0 byteLength"));
 
   return $readableStreamBYOBReaderRead(this, view);
 }

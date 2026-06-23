@@ -52,6 +52,8 @@ export function respondWithNewView(this, view) {
 
   if (!ArrayBuffer.$isView(view)) throw $ERR_INVALID_ARG_TYPE("view", "Buffer, TypedArray, or DataView", view);
 
+  if ($isDetached(view)) throw $ERR_INVALID_STATE_TypeError("Viewed ArrayBuffer is detached");
+
   return $readableByteStreamControllerRespondWithNewView(
     $getByIdDirectPrivate(this, "associatedReadableByteStreamController"),
     view,

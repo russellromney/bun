@@ -25,7 +25,13 @@
 
 export function initializeTextDecoderStream() {
   const label = arguments.length >= 1 ? arguments[0] : "utf-8";
-  const options = arguments.length >= 2 ? arguments[1] : {};
+  let options = arguments.length >= 2 ? arguments[1] : {};
+  // WebIDL dictionary conversion: only undefined, null, or objects are accepted.
+  if (options === undefined || options === null) {
+    options = {};
+  } else if (!$isObject(options)) {
+    throw $ERR_INVALID_ARG_TYPE("options", "object", options);
+  }
 
   const startAlgorithm = () => {
     return Promise.$resolve();

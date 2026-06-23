@@ -368,10 +368,21 @@ export function readableByteStreamControllerRespondWithNewView(controller, view)
 
   let firstDescriptor: PullIntoDescriptor | undefined = $getByIdDirectPrivate(controller, "pendingPullIntos").peek();
 
+  // A closed stream only accepts a zero-length view; a readable stream only a
+  // non-zero-length one.
+  const state = $getByIdDirectPrivate($getByIdDirectPrivate(controller, "controlledReadableStream"), "state");
+  if (state === $streamClosed) {
+    if (view.byteLength !== 0) throw $ERR_INVALID_STATE_TypeError("View is not zero-length");
+  } else {
+    if (view.byteLength === 0) throw $ERR_INVALID_STATE_TypeError("View is zero-length");
+  }
+
   if (firstDescriptor!.byteOffset + firstDescriptor!.bytesFilled !== view.byteOffset)
     throw new RangeError("Invalid value for view.byteOffset");
 
   if (firstDescriptor!.byteLength < view.byteLength) throw $ERR_INVALID_ARG_VALUE("view", view);
+
+  if (firstDescriptor!.buffer.byteLength !== view.buffer.byteLength) throw $ERR_INVALID_ARG_VALUE_RangeError("view", view);
 
   firstDescriptor!.buffer = view.buffer;
   $readableByteStreamControllerRespondInternal(controller, view.byteLength);
