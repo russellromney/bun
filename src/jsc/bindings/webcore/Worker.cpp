@@ -85,7 +85,7 @@ void WebWorker__setRef(void* worker, bool ref);
 
 // Sample the worker's event-loop idle/active time (ms) for
 // worker.performance.eventLoopUtilization(). Parent thread only; synchronised
-// against worker teardown inside the Zig implementation.
+// against worker teardown in src/jsc/web_worker.rs.
 void WebWorker__getEventLoopUtilization(void* worker, double* idleMs, double* activeMs);
 
 // Release the keep-alive on the parent event loop. Called from the close task on the parent
