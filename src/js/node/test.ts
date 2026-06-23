@@ -1,21 +1,44 @@
 // Hardcoded module "node:test"
 // This follows the Node.js API as described in: https://nodejs.org/api/test.html
+//
+// Top-level tests and suites are scheduled through bun:test (Bun.jest), while
+// subtests created inside a running test are executed inline by this module so
+// that Node's TestContext semantics (subtests, hooks, plan, mock tracker,
+// getTestContext) are observable without a separate runner process.
 
 const { jest } = Bun;
 const { kEmptyObject, throwNotImplemented } = require("internal/shared");
-const { validateBoolean, validateInteger, validateObject } = require("internal/validators");
+const {
+  validateBoolean,
+  validateInteger,
+  validateObject,
+  validateNumber,
+  validateFunction,
+  validateString,
+  validateArray,
+  validateAbortSignal,
+  validateUint32,
+} = require("internal/validators");
 
 const kDefaultName = "<anonymous>";
+const kRootName = "<root>";
 const kDefaultFunction = () => {};
 const kDefaultOptions = kEmptyObject;
+// Matches Node's internal/timers TIMEOUT_MAX.
+const kTimeoutMax = 2 ** 31 - 1;
+const kJoinSeparator = " > ";
 
 function run() {
   throwNotImplemented("run()", 5090, "Use `bun:test` in the interim.");
 }
 
+// -----------------------------------------------------------------------------
+// MockTracker
+//
 // Port of Node.js lib/internal/test_runner/mock/mock.js (v26.3.0):
 //   https://github.com/nodejs/node/blob/50c35fea9e64d50ab3bb5f359e8523de89d6c798/lib/internal/test_runner/mock/mock.js
 // API reference: https://nodejs.org/api/test.html#class-mocktracker
+// -----------------------------------------------------------------------------
 let trackMockCall: (ctx: MockFunctionContext, thisArg: unknown, args: unknown[], target: unknown) => unknown;
 
 class MockFunctionContext {
@@ -131,34 +154,94 @@ class MockFunctionContext {
   }
 }
 
-function createMockFunction(
-  original: Function,
-  implementation: Function | undefined,
-  restore?: () => void,
-  times: number = Infinity,
-) {
-  const context = new MockFunctionContext(original, implementation, restore, times);
-  kMockContexts.push(context);
-  function mockFunction(this: unknown, ...args: unknown[]) {
-    return trackMockCall(context, this, args, new.target);
-  }
-  Object.defineProperty(mockFunction, "mock", {
-    value: context,
-    writable: false,
-    enumerable: false,
-  });
-  Object.defineProperty(mockFunction, "length", {
-    value: original.length,
-    configurable: true,
-  });
-  Object.defineProperty(mockFunction, "name", {
-    value: original.name,
-    configurable: true,
-  });
-  return mockFunction;
-}
+class MockPropertyContext {
+  #object: object;
+  #propertyName: PropertyKey;
+  #value: unknown;
+  #originalValue: unknown;
+  #descriptor: PropertyDescriptor;
+  #accesses: unknown[];
+  #onceValues: Map<number, unknown>;
 
-const kMockContexts: MockFunctionContext[] = [];
+  constructor(object: object, propertyName: PropertyKey, value?: unknown) {
+    this.#onceValues = new Map();
+    this.#accesses = [];
+    this.#object = object;
+    this.#propertyName = propertyName;
+    this.#originalValue = object[propertyName];
+    this.#value = arguments.length > 2 ? value : this.#originalValue;
+    const descriptor = Object.getOwnPropertyDescriptor(object, propertyName);
+    if (!descriptor) {
+      throw $ERR_INVALID_ARG_VALUE("propertyName", propertyName, "is not a property of the object");
+    }
+    this.#descriptor = descriptor;
+
+    const { configurable, enumerable } = descriptor;
+    Object.defineProperty(object, propertyName, {
+      configurable,
+      enumerable,
+      get: () => {
+        const nextValue = this.#getAccessValue(this.#value);
+        this.#accesses.push({
+          type: "get",
+          value: nextValue,
+          stack: new Error(),
+        });
+        return nextValue;
+      },
+      set: this.mockImplementation.bind(this),
+    });
+  }
+
+  get accesses() {
+    return this.#accesses.slice(0);
+  }
+
+  accessCount(): number {
+    return this.#accesses.length;
+  }
+
+  mockImplementation(value: unknown) {
+    if (!this.#descriptor.writable) {
+      throw $ERR_INVALID_ARG_VALUE("propertyName", this.#propertyName, "cannot be set");
+    }
+    const nextValue = this.#getAccessValue(value);
+    this.#accesses.push({
+      type: "set",
+      value: nextValue,
+      stack: new Error(),
+    });
+    this.#value = nextValue;
+  }
+
+  #getAccessValue(value: unknown) {
+    const accessIndex = this.#accesses.length;
+    if (this.#onceValues.has(accessIndex)) {
+      const accessValue = this.#onceValues.get(accessIndex);
+      this.#onceValues.delete(accessIndex);
+      return accessValue;
+    }
+    return value;
+  }
+
+  mockImplementationOnce(value: unknown, onAccess?: number) {
+    const nextAccess = this.#accesses.length;
+    const accessIndex = onAccess ?? nextAccess;
+    validateInteger(accessIndex, "onAccess", nextAccess);
+    this.#onceValues.set(accessIndex, value);
+  }
+
+  resetAccesses() {
+    this.#accesses = [];
+  }
+
+  restore() {
+    Object.defineProperty(this.#object, this.#propertyName, {
+      ...this.#descriptor,
+      value: this.#originalValue,
+    });
+  }
+}
 
 function validateTimes(value: unknown, name: string) {
   if (value === Infinity) {
@@ -167,141 +250,175 @@ function validateTimes(value: unknown, name: string) {
   validateInteger(value, name, 1);
 }
 
-function mockFn(original?: Function | object, implementation?: Function | object, options?: object) {
-  if (original !== null && original !== undefined && !$isCallable(original) && typeof original === "object") {
-    options = implementation as object;
-    implementation = original;
-    original = undefined;
+function validateStringOrSymbol(value: unknown, name: string) {
+  if (typeof value !== "string" && typeof value !== "symbol") {
+    throw $ERR_INVALID_ARG_TYPE(name, ["string", "symbol"], value);
   }
-  if (
-    implementation !== null &&
-    implementation !== undefined &&
-    !$isCallable(implementation) &&
-    typeof implementation === "object"
-  ) {
-    options = implementation as object;
-    implementation = undefined;
-  }
-  if (original !== undefined && !$isCallable(original)) {
-    throw $ERR_INVALID_ARG_TYPE("original", "function", original);
-  }
-  if (implementation !== undefined && !$isCallable(implementation)) {
-    throw $ERR_INVALID_ARG_TYPE("implementation", "function", implementation);
-  }
-  if (options !== undefined) {
-    validateObject(options, "options");
-  }
-  const { times = Infinity } = (options ?? kEmptyObject) as { times?: number };
-  validateTimes(times, "options.times");
-  return createMockFunction(
-    (original as Function) ?? function () {},
-    implementation as Function | undefined,
-    undefined,
-    times,
-  );
 }
 
-function mockMethod(
-  objectOrFunction: object | Function,
-  methodName: PropertyKey,
-  implementation?: Function | object,
-  options?: { getter?: boolean; setter?: boolean } | object,
-) {
-  if (
-    implementation !== null &&
-    implementation !== undefined &&
-    !$isCallable(implementation) &&
-    typeof implementation === "object"
+class MockTracker {
+  #mocks: { ctx: { restore: () => void } }[] = [];
+  #timers: unknown;
+
+  #createMockFunction(
+    original: Function,
+    implementation: Function | undefined,
+    restore?: () => void,
+    times: number = Infinity,
   ) {
-    options = implementation;
-    implementation = undefined;
-  }
-  if (implementation !== undefined && !$isCallable(implementation)) {
-    throw $ERR_INVALID_ARG_TYPE("implementation", "function", implementation);
-  }
-  if ((typeof objectOrFunction !== "object" || objectOrFunction === null) && !$isCallable(objectOrFunction)) {
-    throw $ERR_INVALID_ARG_TYPE("object", "object", objectOrFunction);
-  }
-  if (typeof methodName !== "string" && typeof methodName !== "symbol") {
-    throw $ERR_INVALID_ARG_TYPE("methodName", ["string", "symbol"], methodName);
-  }
-  if (options !== undefined) {
-    validateObject(options, "options");
-  }
-  const {
-    getter = false,
-    setter = false,
-    times = Infinity,
-  } = (options ?? kEmptyObject) as {
-    getter?: boolean;
-    setter?: boolean;
-    times?: number;
-  };
-  validateBoolean(getter, "options.getter");
-  validateBoolean(setter, "options.setter");
-  validateTimes(times, "options.times");
-  if (setter && getter) {
-    throw $ERR_INVALID_ARG_VALUE("options.setter", setter, "cannot be used with 'options.getter'");
+    const context = new MockFunctionContext(original, implementation, restore, times);
+    this.#mocks.push({ ctx: context });
+    function mockFunction(this: unknown, ...args: unknown[]) {
+      return trackMockCall(context, this, args, new.target);
+    }
+    Object.defineProperty(mockFunction, "mock", {
+      value: context,
+      writable: false,
+      enumerable: false,
+    });
+    Object.defineProperty(mockFunction, "length", {
+      value: original.length,
+      configurable: true,
+    });
+    Object.defineProperty(mockFunction, "name", {
+      value: original.name,
+      configurable: true,
+    });
+    return mockFunction;
   }
 
-  // Find the descriptor on the object or its prototype chain.
-  let target: object | null = objectOrFunction;
-  let descriptor: PropertyDescriptor | undefined;
-  while (target !== null) {
-    descriptor = Object.getOwnPropertyDescriptor(target, methodName);
-    if (descriptor !== undefined) break;
-    target = Object.getPrototypeOf(target);
-  }
-  if (descriptor === undefined) {
-    throw $ERR_INVALID_ARG_VALUE("methodName", methodName, "must be a method");
+  fn(original?: Function | object, implementation?: Function | object, options?: object) {
+    if (original !== null && original !== undefined && !$isCallable(original) && typeof original === "object") {
+      options = implementation as object;
+      implementation = original;
+      original = undefined;
+    }
+    if (
+      implementation !== null &&
+      implementation !== undefined &&
+      !$isCallable(implementation) &&
+      typeof implementation === "object"
+    ) {
+      options = implementation as object;
+      implementation = undefined;
+    }
+    if (original !== undefined && !$isCallable(original)) {
+      throw $ERR_INVALID_ARG_TYPE("original", "function", original);
+    }
+    if (implementation !== undefined && !$isCallable(implementation)) {
+      throw $ERR_INVALID_ARG_TYPE("implementation", "function", implementation);
+    }
+    if (options !== undefined) {
+      validateObject(options, "options");
+    }
+    const { times = Infinity } = (options ?? kEmptyObject) as { times?: number };
+    validateTimes(times, "options.times");
+    return this.#createMockFunction(
+      (original as Function) ?? function () {},
+      implementation as Function | undefined,
+      undefined,
+      times,
+    );
   }
 
-  let original: Function;
-  if (getter) {
-    if (!$isCallable(descriptor.get)) {
-      throw $ERR_INVALID_ARG_VALUE("methodName", methodName, "must be a getter");
+  method(
+    objectOrFunction: object | Function,
+    methodName: PropertyKey,
+    implementation?: Function | object,
+    options?: { getter?: boolean; setter?: boolean } | object,
+  ) {
+    if (
+      implementation !== null &&
+      implementation !== undefined &&
+      !$isCallable(implementation) &&
+      typeof implementation === "object"
+    ) {
+      options = implementation;
+      implementation = undefined;
     }
-    original = descriptor.get;
-  } else if (setter) {
-    if (!$isCallable(descriptor.set)) {
-      throw $ERR_INVALID_ARG_VALUE("methodName", methodName, "must be a setter");
+    if (implementation !== undefined && !$isCallable(implementation)) {
+      throw $ERR_INVALID_ARG_TYPE("implementation", "function", implementation);
     }
-    original = descriptor.set;
-  } else {
-    if (!$isCallable(descriptor.value)) {
+    if ((typeof objectOrFunction !== "object" || objectOrFunction === null) && !$isCallable(objectOrFunction)) {
+      throw $ERR_INVALID_ARG_TYPE("object", "object", objectOrFunction);
+    }
+    if (typeof methodName !== "string" && typeof methodName !== "symbol") {
+      throw $ERR_INVALID_ARG_TYPE("methodName", ["string", "symbol"], methodName);
+    }
+    if (options !== undefined) {
+      validateObject(options, "options");
+    }
+    const {
+      getter = false,
+      setter = false,
+      times = Infinity,
+    } = (options ?? kEmptyObject) as {
+      getter?: boolean;
+      setter?: boolean;
+      times?: number;
+    };
+    validateBoolean(getter, "options.getter");
+    validateBoolean(setter, "options.setter");
+    validateTimes(times, "options.times");
+    if (setter && getter) {
+      throw $ERR_INVALID_ARG_VALUE("options.setter", setter, "cannot be used with 'options.getter'");
+    }
+
+    // Find the descriptor on the object or its prototype chain.
+    let target: object | null = objectOrFunction;
+    let descriptor: PropertyDescriptor | undefined;
+    while (target !== null) {
+      descriptor = Object.getOwnPropertyDescriptor(target, methodName);
+      if (descriptor !== undefined) break;
+      target = Object.getPrototypeOf(target);
+    }
+    if (descriptor === undefined) {
       throw $ERR_INVALID_ARG_VALUE("methodName", methodName, "must be a method");
     }
-    original = descriptor.value;
-  }
 
-  const restore = function restore() {
-    Object.defineProperty(objectOrFunction, methodName, descriptor!);
-  };
-  const mocked = createMockFunction(original, implementation as Function | undefined, restore, times);
-
-  const mockDescriptor: PropertyDescriptor = {
-    configurable: descriptor.configurable,
-    enumerable: descriptor.enumerable,
-  };
-  if (getter || setter) {
+    let original: Function;
     if (getter) {
-      mockDescriptor.get = mocked;
-      mockDescriptor.set = descriptor.set;
+      if (!$isCallable(descriptor.get)) {
+        throw $ERR_INVALID_ARG_VALUE("methodName", methodName, "must be a getter");
+      }
+      original = descriptor.get!;
+    } else if (setter) {
+      if (!$isCallable(descriptor.set)) {
+        throw $ERR_INVALID_ARG_VALUE("methodName", methodName, "must be a setter");
+      }
+      original = descriptor.set!;
     } else {
-      mockDescriptor.get = descriptor.get;
-      mockDescriptor.set = mocked;
+      if (!$isCallable(descriptor.value)) {
+        throw $ERR_INVALID_ARG_VALUE("methodName", methodName, "must be a method");
+      }
+      original = descriptor.value;
     }
-  } else {
-    mockDescriptor.value = mocked;
-    mockDescriptor.writable = descriptor.writable;
-  }
-  Object.defineProperty(objectOrFunction, methodName, mockDescriptor);
-  return mocked;
-}
 
-const mock = {
-  fn: mockFn,
-  method: mockMethod,
+    const restore = function restore() {
+      Object.defineProperty(objectOrFunction, methodName, descriptor!);
+    };
+    const mocked = this.#createMockFunction(original, implementation as Function | undefined, restore, times);
+
+    const mockDescriptor: PropertyDescriptor = {
+      configurable: descriptor.configurable,
+      enumerable: descriptor.enumerable,
+    };
+    if (getter || setter) {
+      if (getter) {
+        mockDescriptor.get = mocked;
+        mockDescriptor.set = descriptor.set;
+      } else {
+        mockDescriptor.get = descriptor.get;
+        mockDescriptor.set = mocked;
+      }
+    } else {
+      mockDescriptor.value = mocked;
+      mockDescriptor.writable = descriptor.writable;
+    }
+    Object.defineProperty(objectOrFunction, methodName, mockDescriptor);
+    return mocked;
+  }
+
   getter(
     objectOrFunction: object | Function,
     methodName: PropertyKey,
@@ -309,7 +426,7 @@ const mock = {
     options?: object,
   ) {
     // Shift implementation -> options *before* spreading, or the shift inside
-    // mockMethod would clobber the getter flag (node does the same).
+    // method() would clobber the getter flag (node does the same).
     if (
       implementation !== null &&
       implementation !== undefined &&
@@ -323,11 +440,12 @@ const mock = {
     if (getter === false) {
       throw $ERR_INVALID_ARG_VALUE("options.getter", getter, "cannot be false");
     }
-    return mockMethod(objectOrFunction, methodName, implementation as Function | undefined, {
+    return this.method(objectOrFunction, methodName, implementation as Function | undefined, {
       ...options,
       getter,
     });
-  },
+  }
+
   setter(
     objectOrFunction: object | Function,
     methodName: PropertyKey,
@@ -347,26 +465,65 @@ const mock = {
     if (setter === false) {
       throw $ERR_INVALID_ARG_VALUE("options.setter", setter, "cannot be false");
     }
-    return mockMethod(objectOrFunction, methodName, implementation as Function | undefined, {
+    return this.method(objectOrFunction, methodName, implementation as Function | undefined, {
       ...options,
       setter,
     });
-  },
+  }
+
+  property(object: object, propertyName: PropertyKey, value?: unknown) {
+    validateObject(object, "object");
+    validateStringOrSymbol(propertyName, "propertyName");
+
+    const ctx =
+      arguments.length > 2
+        ? new MockPropertyContext(object, propertyName, value)
+        : new MockPropertyContext(object, propertyName);
+    this.#mocks.push({ ctx });
+
+    return new Proxy(object, {
+      get(target, property, receiver) {
+        if (property === "mock") {
+          return ctx;
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+  }
+
+  get timers() {
+    if (this.#timers === undefined) {
+      const { MockTimers } = require("internal/test_runner/mock_timers");
+      this.#timers = new MockTimers();
+    }
+    return this.#timers;
+  }
+
   reset() {
     // restoreAll() plus disassociating the mocks from the tracker, like node.
-    mock.restoreAll();
-    kMockContexts.length = 0;
-  },
+    this.restoreAll();
+    (this.#timers as { reset: () => void } | undefined)?.reset();
+    this.#mocks = [];
+  }
+
   restoreAll() {
     // Restores method mocks to their original descriptor and makes bare
     // mock.fn() mocks call their original function again, like node. Unlike
     // reset(), the mocks stay associated with the tracker.
-    for (const ctx of kMockContexts) ctx.restore();
-  },
+    for (const { ctx } of this.#mocks) ctx.restore();
+  }
+
   module() {
     throwNotImplemented("mock.module()", 5090, "Use `bun:test` in the interim.");
-  },
-};
+  }
+}
+
+// The module-level tracker is process-wide and is never reset automatically.
+const mock = new MockTracker();
+
+// -----------------------------------------------------------------------------
+// Assertions (t.assert + custom assertion registry)
+// -----------------------------------------------------------------------------
 
 function fileSnapshot(_value: unknown, _path: string, _options: { serializers?: Function[] } = kEmptyObject) {
   throwNotImplemented("fileSnapshot()", 5090, "Use `bun:test` in the interim.");
@@ -376,11 +533,23 @@ function snapshot(_value: unknown, _options: { serializers?: Function[] } = kEmp
   throwNotImplemented("snapshot()", 5090, "Use `bun:test` in the interim.");
 }
 
+const nodeAssert = require("node:assert");
+
+// Custom assertions registered through `require("node:test").assert.register()`.
+// They become part of every TestContext's `t.assert` built afterwards.
+const customAssertions = new Map<string, Function>();
+
+function registerCustomAssertion(name: string, fn: Function) {
+  validateString(name, "name");
+  validateFunction(fn, "fn");
+  customAssertions.set(name, fn);
+}
+
 const assert = {
-  ...require("node:assert"),
+  ...nodeAssert,
   fileSnapshot,
   snapshot,
-  // register,
+  register: registerCustomAssertion,
 };
 
 // Delete deprecated methods on assert (required to pass node's tests)
@@ -388,28 +557,285 @@ delete assert.AssertionError;
 delete assert.CallTracker;
 delete assert.strict;
 
-let checkNotInsideTest: (ctx: TestContext | undefined, fn: string) => void;
+function buildContextAssert(node: TestNode, ctx: TestContext) {
+  // Build the per-context assertion object: every node:assert function except
+  // the uncopied ones, plus snapshot/fileSnapshot and any registered custom
+  // assertions. Each call increments the test plan and runs with `this` set to
+  // the TestContext, matching Node.
+  const methods = new Map<string, Function>();
+  for (const key of Object.keys(nodeAssert)) {
+    // CallTracker is also excluded: bun's node:assert still ships it (Node 26
+    // does not), and copying it would trigger its deprecation accessor.
+    if (key === "AssertionError" || key === "strict" || key === "CallTracker") continue;
+    const value = nodeAssert[key];
+    if (!$isCallable(value)) continue;
+    methods.set(key, value);
+  }
+  methods.set("snapshot", snapshot);
+  methods.set("fileSnapshot", fileSnapshot);
+  for (const [name, fn] of customAssertions) {
+    methods.set(name, fn);
+  }
+
+  const result: Record<string, Function> = {};
+  for (const [name, method] of methods) {
+    result[name] = function (...args: unknown[]) {
+      planCount(node);
+      return method.$apply(ctx, args);
+    };
+    Object.defineProperty(result[name], "name", { value: name, configurable: true });
+  }
+  return result;
+}
+
+// -----------------------------------------------------------------------------
+// Test plan
+// -----------------------------------------------------------------------------
+
+function makeTestFailure(message: string) {
+  const error = new Error(message);
+  (error as { code?: string }).code = "ERR_TEST_FAILURE";
+  return error;
+}
+
+class TestPlan {
+  expected: number;
+  actual = 0;
+  wait: boolean | number;
+  #pending:
+    | { resolve: () => void; reject: (err: Error) => void; timer: ReturnType<typeof setTimeout> | undefined }
+    | undefined;
+
+  constructor(count: number, options: { wait?: boolean | number } = kEmptyObject) {
+    validateUint32(count, "count");
+    validateObject(options, "options");
+    const { wait = false } = options;
+    if (typeof wait === "number") {
+      validateNumber(wait, "options.wait", 0, kTimeoutMax);
+    } else if (typeof wait !== "boolean" && wait !== undefined) {
+      throw $ERR_INVALID_ARG_TYPE("options.wait", ["boolean", "number"], wait);
+    }
+    this.expected = count;
+    this.wait = wait ?? false;
+  }
+
+  count() {
+    this.actual++;
+    if (this.#pending !== undefined && this.actual >= this.expected) {
+      const pending = this.#pending;
+      this.#pending = undefined;
+      const { timer } = pending;
+      if (timer !== undefined) clearTimeout(timer);
+      pending.resolve();
+    }
+  }
+
+  check(): undefined | Promise<void> {
+    const { actual, expected, wait } = this;
+    if (actual === expected) {
+      return;
+    }
+    if (wait === false || wait === undefined || actual > expected) {
+      throw makeTestFailure(`plan expected ${expected} assertions but received ${actual}`);
+    }
+    return new Promise((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      if (typeof wait === "number") {
+        timer = setTimeout(() => {
+          this.#pending = undefined;
+          reject(
+            makeTestFailure(`plan timed out after ${wait}ms with ${this.actual} assertions when expecting ${expected}`),
+          );
+        }, wait);
+        timer.unref?.();
+      }
+      this.#pending = { resolve, reject, timer };
+    });
+  }
+}
+
+function planCount(node: TestNode) {
+  node.plan?.count();
+}
+
+// -----------------------------------------------------------------------------
+// Tags
+// -----------------------------------------------------------------------------
+
+const kEmptyTags: string[] = Object.freeze([]) as string[];
+let tagsExperimentalWarningEmitted = false;
+
+function canonicalizeTags(tags: unknown, name: string): string[] {
+  validateArray(tags, name);
+  const seen = new Set<string>();
+  for (let i = 0; i < (tags as unknown[]).length; i++) {
+    const tag = (tags as unknown[])[i];
+    validateString(tag, `${name}[${i}]`);
+    if (tag === "") {
+      throw $ERR_INVALID_ARG_VALUE(`${name}[${i}]`, tag, "must not be an empty string");
+    }
+    seen.add((tag as string).toLowerCase());
+  }
+  if (seen.size > 0 && !tagsExperimentalWarningEmitted) {
+    tagsExperimentalWarningEmitted = true;
+    process.emitWarning("Test tags is an experimental feature and might change at any time", "ExperimentalWarning");
+  }
+  return Array.from(seen);
+}
+
+// -----------------------------------------------------------------------------
+// Async context tracking for getTestContext()
+// -----------------------------------------------------------------------------
+
+let asyncLocalStorage: { getStore(): TestNode | undefined; run<T>(store: TestNode, fn: () => T): T } | undefined;
+
+function getAsyncLocalStorage() {
+  if (asyncLocalStorage === undefined) {
+    const { AsyncLocalStorage } = require("node:async_hooks");
+    asyncLocalStorage = new AsyncLocalStorage();
+  }
+  return asyncLocalStorage;
+}
+
+function currentNode(): TestNode | undefined {
+  return asyncLocalStorage?.getStore();
+}
+
+function runWithNode<T>(node: TestNode, fn: () => T): T {
+  return getAsyncLocalStorage().run(node, fn);
+}
+
+function getTestContext(): TestContext | undefined {
+  const node = currentNode();
+  return node?.getCtx();
+}
+
+// -----------------------------------------------------------------------------
+// TestNode: internal runner state shared by TestContext/SuiteContext
+// -----------------------------------------------------------------------------
+
+type Hook = { fn: Function };
+type HookSets = { before: Hook[]; after: Hook[]; beforeEach: Hook[]; afterEach: Hook[] };
+
+class TestNode {
+  name: string;
+  parent: TestNode | undefined;
+  isSuite: boolean;
+  // "collection" nodes register with bun:test; "execution" nodes run inline as subtests.
+  isExecutionPhase: boolean;
+  filePath: string | undefined;
+  options: TestOptions;
+  ownTags: string[] | undefined;
+  hooks: HookSets = { before: [], after: [], beforeEach: [], afterEach: [] };
+  beforeHooksRan = false;
+  plan: TestPlan | null = null;
+  mockTracker: MockTracker | null = null;
+  skipped = false;
+  todoFlag = false;
+  started = false;
+  finished = false;
+  passed = false;
+  // Inline subtests are serialized through this chain (Node's default subtest concurrency is 1).
+  subtestChain: Promise<void> = Promise.resolve();
+  failedSubtests = 0;
+  firstSubtestError: unknown = undefined;
+  #ctx: TestContext | undefined;
+  #suiteCtx: SuiteContext | undefined;
+  #tags: string[] | undefined;
+
+  constructor(
+    name: string,
+    parent: TestNode | undefined,
+    options: TestOptions,
+    isSuite: boolean,
+    isExecutionPhase: boolean,
+  ) {
+    this.name = name;
+    this.parent = parent;
+    this.options = options;
+    this.isSuite = isSuite;
+    this.isExecutionPhase = isExecutionPhase;
+    // Direct children of the root capture the entry file at declaration time
+    // (under `bun test` with multiple files, Bun.main is the file currently
+    // being collected); nested tests inherit their parent's file.
+    this.filePath = parent !== undefined && parent.parent !== undefined ? parent.filePath : Bun.main;
+    this.skipped = !!options.skip;
+    this.todoFlag = !!options.todo;
+  }
+
+  get tags(): string[] {
+    if (this.#tags === undefined) {
+      const parentTags = this.parent?.tags ?? kEmptyTags;
+      const own = this.ownTags ?? kEmptyTags;
+      if (parentTags.length === 0 && own.length === 0) {
+        this.#tags = kEmptyTags;
+      } else {
+        const merged = new Set<string>(parentTags);
+        for (const tag of own) merged.add(tag);
+        this.#tags = Object.freeze(Array.from(merged)) as string[];
+      }
+    }
+    return this.#tags;
+  }
+
+  get fullName(): string {
+    const names: string[] = [];
+    let node: TestNode | undefined = this;
+    while (node !== undefined && node.parent !== undefined) {
+      names.unshift(node.name);
+      node = node.parent;
+    }
+    if (names.length === 0) {
+      return this.name;
+    }
+    return names.join(kJoinSeparator);
+  }
+
+  getCtx(): TestContext {
+    this.#ctx ??= new TestContext(this);
+    return this.#ctx;
+  }
+
+  getSuiteCtx(): SuiteContext {
+    this.#suiteCtx ??= new SuiteContext(this);
+    return this.#suiteCtx;
+  }
+
+  // True while user code reached from this node should treat new tests as
+  // inline subtests instead of bun:test registrations.
+  isRunning(): boolean {
+    return (this.started && !this.finished) || this.isExecutionPhase;
+  }
+}
+
+let rootNode: TestNode | undefined;
+
+function getRootNode(): TestNode {
+  if (rootNode === undefined) {
+    rootNode = new TestNode(kRootName, undefined, kDefaultOptions, true, false);
+  }
+  return rootNode;
+}
+
+// -----------------------------------------------------------------------------
+// Contexts
+// -----------------------------------------------------------------------------
+
+const contextNode: WeakMap<object, TestNode> = new WeakMap();
 
 /**
  * @link https://nodejs.org/api/test.html#class-testcontext
  */
 class TestContext {
-  #insideTest: boolean;
-  #name: string | undefined;
-  #filePath: string | undefined;
-  #parent?: TestContext;
   #abortController?: AbortController;
+  #assert: Record<string, Function> | undefined;
 
-  constructor(
-    insideTest: boolean,
-    name: string | undefined,
-    filePath: string | undefined,
-    parent: TestContext | undefined,
-  ) {
-    this.#insideTest = insideTest;
-    this.#name = name;
-    this.#filePath = filePath || parent?.filePath || kDefaultFilePath;
-    this.#parent = parent;
+  constructor(node: TestNode) {
+    contextNode.set(this, node);
+  }
+
+  get #node(): TestNode {
+    return contextNode.get(this)!;
   }
 
   get signal(): AbortSignal {
@@ -420,38 +846,54 @@ class TestContext {
   }
 
   get name(): string {
-    return this.#name!;
+    return this.#node.name;
   }
 
   get fullName(): string {
-    let fullName = this.#name;
-    let parent = this.#parent;
-    while (parent && parent.name) {
-      fullName = `${parent.name} > ${fullName}`;
-      parent = parent.#parent;
-    }
-    return fullName!;
+    return this.#node.fullName;
   }
 
   get filePath(): string {
-    return this.#filePath!;
+    return this.#node.filePath!;
+  }
+
+  get error(): unknown {
+    return undefined;
+  }
+
+  get passed(): boolean {
+    return this.#node.passed;
+  }
+
+  get attempt(): number {
+    return 0;
+  }
+
+  get tags(): string[] {
+    return this.#node.tags;
   }
 
   diagnostic(message: string) {
     console.log(message);
   }
 
-  plan(_count: number, _options: { wait?: boolean } = kEmptyObject) {
-    throwNotImplemented("plan()", 5090, "Use `bun:test` in the interim.");
+  plan(count: number, options: { wait?: boolean | number } = kEmptyObject) {
+    const node = this.#node;
+    if (node.plan !== null) {
+      throw makeTestFailure("cannot set plan more than once");
+    }
+    node.plan = new TestPlan(count, options);
   }
 
   get assert() {
-    return assert;
+    this.#assert ??= buildContextAssert(this.#node, this);
+    return this.#assert;
   }
 
-  get mock() {
-    throwNotImplemented("mock", 5090, "Use `bun:test` in the interim.");
-    return undefined;
+  get mock(): MockTracker {
+    const node = this.#node;
+    node.mockTracker ??= new MockTracker();
+    return node.mockTracker;
   }
 
   runOnly(_value?: boolean) {
@@ -459,171 +901,158 @@ class TestContext {
   }
 
   skip(_message?: string) {
-    throwNotImplemented("skip()", 5090, "Use `bun:test` in the interim.");
+    this.#node.skipped = true;
   }
 
   todo(_message?: string) {
-    throwNotImplemented("todo()", 5090, "Use `bun:test` in the interim.");
+    this.#node.todoFlag = true;
   }
 
   before(arg0: unknown, arg1: unknown) {
     const { fn } = createHook(arg0, arg1);
-    const { beforeAll } = bunTest();
-    beforeAll(fn);
+    const node = this.#node;
+    node.hooks.before.push({ fn });
+    if (node.started && !node.finished) {
+      // Node runs before hooks created on an already-started test immediately.
+      node.subtestChain = node.subtestChain.then(() => fn(this));
+    }
   }
 
   after(arg0: unknown, arg1: unknown) {
     const { fn } = createHook(arg0, arg1);
-    const { afterAll } = bunTest();
-    afterAll(fn);
+    this.#node.hooks.after.push({ fn });
   }
 
   beforeEach(arg0: unknown, arg1: unknown) {
     const { fn } = createHook(arg0, arg1);
-    const { beforeEach } = bunTest();
-    beforeEach(fn);
+    this.#node.hooks.beforeEach.push({ fn });
   }
 
   afterEach(arg0: unknown, arg1: unknown) {
     const { fn } = createHook(arg0, arg1);
-    const { afterEach } = bunTest();
-    afterEach(fn);
+    this.#node.hooks.afterEach.push({ fn });
   }
 
-  waitFor(_condition: unknown, _options: { timeout?: number } = kEmptyObject) {
-    throwNotImplemented("waitFor()", 5090, "Use `bun:test` in the interim.");
+  waitFor(condition: unknown, options: { interval?: number; timeout?: number } = kEmptyObject) {
+    validateFunction(condition, "condition");
+    validateObject(options, "options");
+    const { interval = 50, timeout = 1000 } = options;
+    validateNumber(interval, "options.interval", 0, kTimeoutMax);
+    validateNumber(timeout, "options.timeout", 0, kTimeoutMax);
+
+    return new Promise((resolve, reject) => {
+      let cause: unknown;
+      let hasCause = false;
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        const error = new Error("waitFor() timed out");
+        if (hasCause) {
+          (error as { cause?: unknown }).cause = cause;
+        }
+        reject(error);
+      }, timeout);
+
+      const poll = async () => {
+        try {
+          const result = await (condition as Function)();
+          if (timedOut) return;
+          clearTimeout(timer);
+          resolve(result);
+        } catch (err) {
+          if (timedOut) return;
+          cause = err;
+          hasCause = true;
+          setTimeout(poll, interval);
+        }
+      };
+      poll();
+    });
   }
 
   test(arg0: unknown, arg1: unknown, arg2: unknown) {
-    const { name, fn, options } = createTest(arg0, arg1, arg2);
-
-    this.#checkNotInsideTest("test");
-
-    const { test } = bunTest();
-    if (options.only) {
-      test.only(name, fn);
-    } else if (options.todo) {
-      test.todo(name, fn);
-    } else if (options.skip) {
-      test.skip(name, fn);
-    } else {
-      test(name, fn);
-    }
+    const node = this.#node;
+    planCount(node);
+    return addTest(arg0, arg1, arg2, node);
   }
 
   describe(arg0: unknown, arg1: unknown, arg2: unknown) {
-    const { name, fn } = createDescribe(arg0, arg1, arg2);
+    return addSuite(arg0, arg1, arg2, this.#node);
+  }
+}
 
-    this.#checkNotInsideTest("describe");
+/**
+ * @link https://nodejs.org/api/test.html#class-suitecontext
+ */
+class SuiteContext {
+  #abortController?: AbortController;
 
-    const { describe } = bunTest();
-    describe(name, fn);
+  constructor(node: TestNode) {
+    contextNode.set(this, node);
   }
 
-  #checkNotInsideTest(fn: string) {
-    if (this.#insideTest) {
-      throwNotImplemented(`${fn}() inside another test()`, 5090, "Use `bun:test` in the interim.");
+  get #node(): TestNode {
+    return contextNode.get(this)!;
+  }
+
+  get signal(): AbortSignal {
+    if (this.#abortController === undefined) {
+      this.#abortController = new AbortController();
     }
+    return this.#abortController.signal;
   }
 
-  static {
-    // expose this function to the rest of this file without exposing it to user JS
-    checkNotInsideTest = (ctx: TestContext | undefined, fn: string) => {
-      if (ctx) ctx.#checkNotInsideTest(fn);
-    };
+  get name(): string {
+    return this.#node.name;
   }
-}
 
-function bunTest() {
-  return jest(Bun.main);
-}
+  get fullName(): string {
+    return this.#node.fullName;
+  }
 
-let ctx: TestContext | undefined = undefined;
+  get filePath(): string {
+    return this.#node.filePath!;
+  }
 
-function describe(arg0: unknown, arg1: unknown, arg2: unknown) {
-  const { name, fn } = createDescribe(arg0, arg1, arg2);
-  const { describe } = bunTest();
-  describe(name, fn);
-}
+  get passed(): boolean {
+    return this.#node.passed;
+  }
 
-describe.skip = function (arg0: unknown, arg1: unknown, arg2: unknown) {
-  const { name, fn } = createDescribe(arg0, arg1, arg2);
-  const { describe } = bunTest();
-  describe.skip(name, fn);
-};
+  get attempt(): number {
+    return 0;
+  }
 
-describe.todo = function (arg0: unknown, arg1: unknown, arg2: unknown) {
-  const { name, fn } = createDescribe(arg0, arg1, arg2);
-  const { describe } = bunTest();
-  describe.todo(name, fn);
-};
-
-describe.only = function (arg0: unknown, arg1: unknown, arg2: unknown) {
-  const { name, fn } = createDescribe(arg0, arg1, arg2);
-  const { describe } = bunTest();
-  describe.only(name, fn);
-};
-
-function test(arg0: unknown, arg1: unknown, arg2: unknown) {
-  const { name, fn, options } = createTest(arg0, arg1, arg2);
-  const { test } = bunTest();
-  // Node's {only: true} is intentionally not routed to test.only() here:
-  // in Node it is a no-op unless --test-only is passed, whereas bun:test's
-  // test.only() unconditionally skips siblings.
-  if (options.todo) {
-    test.todo(name, fn, options);
-  } else if (options.skip) {
-    test.skip(name, fn, options);
-  } else {
-    test(name, fn, options);
+  diagnostic(message: string) {
+    console.log(message);
   }
 }
 
-test.skip = function (arg0: unknown, arg1: unknown, arg2: unknown) {
-  const { name, fn, options } = createTest(arg0, arg1, arg2);
-  const { test } = bunTest();
-  test.skip(name, fn, options);
+// -----------------------------------------------------------------------------
+// Option parsing & validation
+// -----------------------------------------------------------------------------
+
+type TestFn = (ctx: TestContext | SuiteContext) => unknown | Promise<unknown>;
+type HookFn = (ctx?: unknown) => unknown | Promise<unknown>;
+
+type TestOptions = {
+  concurrency?: number | boolean | null;
+  only?: boolean;
+  signal?: AbortSignal;
+  skip?: boolean | string;
+  todo?: boolean | string;
+  timeout?: number;
+  plan?: number;
+  tags?: string[];
 };
 
-test.todo = function (arg0: unknown, arg1: unknown, arg2: unknown) {
-  const { name, fn, options } = createTest(arg0, arg1, arg2);
-  const { test } = bunTest();
-  test.todo(name, fn, options);
+type HookOptions = {
+  signal?: AbortSignal;
+  timeout?: number;
 };
 
-test.only = function (arg0: unknown, arg1: unknown, arg2: unknown) {
-  const { name, fn, options } = createTest(arg0, arg1, arg2);
-  const { test } = bunTest();
-  test.only(name, fn, options);
-};
-
-function before(arg0: unknown, arg1: unknown) {
-  const { fn } = createHook(arg0, arg1);
-  const { beforeAll } = bunTest();
-  beforeAll(fn);
-}
-
-function after(arg0: unknown, arg1: unknown) {
-  const { fn } = createHook(arg0, arg1);
-  const { afterAll } = bunTest();
-  afterAll(fn);
-}
-
-function beforeEach(arg0: unknown, arg1: unknown) {
-  const { fn } = createHook(arg0, arg1);
-  const { beforeEach } = bunTest();
-  beforeEach(fn);
-}
-
-function afterEach(arg0: unknown, arg1: unknown) {
-  const { fn } = createHook(arg0, arg1);
-  const { afterEach } = bunTest();
-  afterEach(fn);
-}
-
-function parseTestOptions(arg0: unknown, arg1: unknown, arg2: unknown) {
+function parseTestArgs(arg0: unknown, arg1: unknown, arg2: unknown) {
   let name: string;
-  let options: unknown;
+  let options: TestOptions;
   let fn: TestFn;
 
   if (typeof arg0 === "function") {
@@ -650,74 +1079,54 @@ function parseTestOptions(arg0: unknown, arg1: unknown, arg2: unknown) {
       fn = kDefaultFunction;
       options = kDefaultOptions;
     }
+  } else if (typeof arg0 === "object" && arg0 !== null) {
+    options = arg0 as TestOptions;
+    if (typeof arg1 === "function") {
+      fn = arg1 as TestFn;
+      name = fn.name || kDefaultName;
+    } else {
+      fn = kDefaultFunction;
+      name = kDefaultName;
+    }
   } else {
     name = kDefaultName;
     fn = kDefaultFunction;
     options = kDefaultOptions;
   }
 
-  return { name, options: options as TestOptions, fn };
+  return { name, options, fn };
 }
 
-function createTest(arg0: unknown, arg1: unknown, arg2: unknown) {
-  const { name, options, fn } = parseTestOptions(arg0, arg1, arg2);
+function validateTestOptions(options: TestOptions): { ownTags: string[] | undefined } {
+  const { timeout, concurrency, signal, tags, plan } = options;
 
-  checkNotInsideTest(ctx, "test");
-  const context = new TestContext(true, name, Bun.main, ctx);
-
-  const runTest = (done: (error?: unknown) => void) => {
-    const originalContext = ctx;
-    ctx = context;
-    const endTest = (error?: unknown) => {
-      try {
-        done(error);
-      } finally {
-        ctx = originalContext;
-      }
-    };
-
-    let result: unknown;
-    try {
-      result = fn(context);
-    } catch (error) {
-      endTest(error);
-      return;
-    }
-    if (result instanceof Promise) {
-      (result as Promise<unknown>).then(() => endTest()).catch(error => endTest(error));
+  if (signal !== undefined) {
+    validateAbortSignal(signal, "options.signal");
+  }
+  if (timeout != null && timeout !== Infinity) {
+    validateNumber(timeout, "options.timeout", 0, kTimeoutMax);
+  }
+  if (concurrency != null && typeof concurrency !== "boolean") {
+    if (typeof concurrency === "number") {
+      validateUint32(concurrency, "options.concurrency", true);
     } else {
-      endTest();
+      throw $ERR_INVALID_ARG_TYPE("options.concurrency", ["boolean", "number"], concurrency);
     }
-  };
+  }
+  if (plan !== undefined) {
+    validateUint32(plan, "options.plan");
+  }
 
-  return { name, options, fn: runTest };
+  let ownTags: string[] | undefined;
+  if (tags !== undefined) {
+    ownTags = canonicalizeTags(tags, "options.tags");
+  }
+
+  return { ownTags };
 }
 
-function createDescribe(arg0: unknown, arg1: unknown, arg2: unknown) {
-  const { name, fn, options } = parseTestOptions(arg0, arg1, arg2);
-
-  checkNotInsideTest(ctx, "describe");
-  const context = new TestContext(false, name, Bun.main, ctx);
-
-  const runDescribe = () => {
-    const originalContext = ctx;
-    ctx = context;
-    const endDescribe = () => {
-      ctx = originalContext;
-    };
-
-    try {
-      return fn(context);
-    } finally {
-      endDescribe();
-    }
-  };
-
-  return { name, options, fn: runDescribe };
-}
-
-function parseHookOptions(arg0: unknown, arg1: unknown) {
-  let fn: HookFn | undefined;
+function parseHookArgs(arg0: unknown, arg1: unknown) {
+  let fn: HookFn;
   let options: HookOptions;
 
   if (typeof arg0 === "function") {
@@ -726,7 +1135,7 @@ function parseHookOptions(arg0: unknown, arg1: unknown) {
     fn = kDefaultFunction;
   }
 
-  if (typeof arg1 === "object") {
+  if (typeof arg1 === "object" && arg1 !== null) {
     options = arg1 as HookOptions;
   } else {
     options = kDefaultOptions;
@@ -736,43 +1145,499 @@ function parseHookOptions(arg0: unknown, arg1: unknown) {
 }
 
 function createHook(arg0: unknown, arg1: unknown) {
-  const { fn, options } = parseHookOptions(arg0, arg1);
-
-  const runHook = (done: (error?: unknown) => void) => {
-    let result: unknown;
-    try {
-      result = fn();
-    } catch (error) {
-      done(error);
-      return;
-    }
-    if (result instanceof Promise) {
-      (result as Promise<unknown>).then(() => done()).catch(error => done(error));
-    } else {
-      done();
-    }
-  };
-
-  return { options, fn: runHook };
+  const { fn, options } = parseHookArgs(arg0, arg1);
+  return { fn, options };
 }
 
-type TestFn = (ctx: TestContext) => unknown | Promise<unknown>;
-type HookFn = () => unknown | Promise<unknown>;
+// -----------------------------------------------------------------------------
+// Execution engine
+// -----------------------------------------------------------------------------
 
-type TestOptions = {
-  concurrency?: number | boolean | null;
-  only?: boolean;
-  signal?: AbortSignal;
-  skip?: boolean | string;
-  todo?: boolean | string;
-  timeout?: number;
-  plan?: number;
+function ancestorChain(node: TestNode): TestNode[] {
+  // Returns [root, ..., parent] (outermost first), excluding `node` itself.
+  const chain: TestNode[] = [];
+  let current = node.parent;
+  while (current !== undefined) {
+    chain.unshift(current);
+    current = current.parent;
+  }
+  return chain;
+}
+
+function invokeTestFn(fn: TestFn, ctx: TestContext) {
+  // Node passes a `done` callback when the test function declares a second
+  // parameter; such tests finish when done() is called instead of when the
+  // returned value settles.
+  if (fn.length >= 2) {
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const done = (err?: unknown) => {
+        if (settled) return;
+        settled = true;
+        if (err) reject(err);
+        else resolve();
+      };
+      (fn as Function)(ctx, done);
+    });
+  }
+  return fn(ctx);
+}
+
+async function runHook(hook: Hook, owner: TestNode, arg: unknown) {
+  await runWithNode(owner, () => (hook.fn as Function)(arg));
+}
+
+async function runOwnBeforeHooks(node: TestNode) {
+  if (node.beforeHooksRan) return;
+  node.beforeHooksRan = true;
+  const arg = node.isSuite ? node.getSuiteCtx() : node.getCtx();
+  for (const hook of node.hooks.before) {
+    await runHook(hook, node, arg);
+  }
+}
+
+async function executeTestNode(node: TestNode, fn: TestFn): Promise<unknown> {
+  // Runs a single test (top-level or subtest): inherited beforeEach hooks, the
+  // body, pending subtests, the plan check, inherited afterEach hooks, and the
+  // test's own after hooks. Returns the failure (if any) instead of throwing.
+  node.started = true;
+  const ctx = node.getCtx();
+  const ancestors = ancestorChain(node);
+  let failure: unknown;
+
+  try {
+    for (const ancestor of ancestors) {
+      for (const hook of ancestor.hooks.beforeEach) {
+        await runHook(hook, ancestor, ctx);
+      }
+    }
+  } catch (err) {
+    failure = err;
+  }
+
+  if (failure === undefined) {
+    const { plan: planOption } = node.options;
+    if (planOption !== undefined && node.plan === null) {
+      node.plan = new TestPlan(planOption);
+    }
+
+    const { timeout } = node.options;
+    let timedOut = false;
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise =
+      typeof timeout === "number" && Number.isFinite(timeout)
+        ? new Promise<never>((_, reject) => {
+            timeoutTimer = setTimeout(() => {
+              timedOut = true;
+              reject(makeTestFailure(`test timed out after ${timeout}ms`));
+            }, timeout);
+            timeoutTimer.unref?.();
+          })
+        : undefined;
+
+    const runBody = async () => {
+      await runWithNode(node, () => invokeTestFn(fn, ctx));
+      // Wait for inline subtests created during the body (awaited or not),
+      // including ones scheduled while earlier subtests were running.
+      let chain;
+      do {
+        chain = node.subtestChain;
+        try {
+          await chain;
+        } catch {
+          // Subtest failures are tracked via failedSubtests.
+        }
+      } while (chain !== node.subtestChain);
+    };
+
+    try {
+      if (timeoutPromise !== undefined) {
+        await Promise.race([runBody(), timeoutPromise]);
+      } else {
+        await runBody();
+      }
+    } catch (err) {
+      failure = err;
+    } finally {
+      // If the body finished first the race promise stays pending forever,
+      // which is harmless; only the timer needs to be cleared.
+      if (timeoutTimer !== undefined && !timedOut) {
+        clearTimeout(timeoutTimer);
+      }
+    }
+
+    const { plan } = node;
+    if (failure === undefined && plan !== null) {
+      try {
+        await plan.check();
+      } catch (err) {
+        failure = err;
+      }
+    }
+
+    const { failedSubtests, firstSubtestError } = node;
+    if (failure === undefined && failedSubtests > 0) {
+      const error = makeTestFailure(`${failedSubtests} subtest${failedSubtests > 1 ? "s" : ""} failed`);
+      if (firstSubtestError !== undefined) {
+        (error as { cause?: unknown }).cause = firstSubtestError;
+      }
+      failure = error;
+    }
+  }
+
+  for (let i = ancestors.length - 1; i >= 0; i--) {
+    const ancestor = ancestors[i];
+    for (const hook of ancestor.hooks.afterEach) {
+      try {
+        await runHook(hook, ancestor, ctx);
+      } catch (err) {
+        failure ??= err;
+      }
+    }
+  }
+
+  for (const hook of node.hooks.after) {
+    try {
+      await runHook(hook, node, ctx);
+    } catch (err) {
+      failure ??= err;
+    }
+  }
+
+  try {
+    node.mockTracker?.reset();
+  } catch (err) {
+    failure ??= err;
+  }
+
+  node.finished = true;
+  node.passed = failure === undefined;
+  return failure;
+}
+
+function scheduleSubtest(parent: TestNode, child: TestNode, fn: TestFn): Promise<undefined> {
+  const run = async () => {
+    if (child.options.skip) {
+      child.finished = true;
+      child.passed = true;
+      return;
+    }
+    let failure: unknown;
+    try {
+      await runOwnBeforeHooks(parent);
+      failure = await executeTestNode(child, fn);
+    } catch (err) {
+      failure = err;
+    }
+    if (failure !== undefined && !child.todoFlag && !child.skipped) {
+      parent.failedSubtests++;
+      parent.firstSubtestError ??= failure;
+    }
+  };
+  const result = (parent.subtestChain = parent.subtestChain.then(run));
+  return result.then(() => undefined);
+}
+
+function scheduleSuiteSubtest(parent: TestNode, suite: TestNode): Promise<undefined> {
+  // A describe()/suite() created while a test is running becomes a suite
+  // subtest: its children were collected eagerly when the callback ran and are
+  // already chained on the suite's own subtestChain; failures roll up here.
+  const run = async () => {
+    try {
+      await runOwnBeforeHooks(suite);
+      await suite.subtestChain;
+    } catch {
+      // Failures are tracked through failedSubtests.
+    }
+    for (const hook of suite.hooks.after) {
+      try {
+        await runHook(hook, suite, suite.getSuiteCtx());
+      } catch {
+        suite.failedSubtests++;
+      }
+    }
+    suite.finished = true;
+    suite.passed = suite.failedSubtests === 0;
+    if (suite.failedSubtests > 0) {
+      parent.failedSubtests++;
+      parent.firstSubtestError ??= suite.firstSubtestError;
+    }
+  };
+  const result = (parent.subtestChain = parent.subtestChain.then(run));
+  return result.then(() => undefined);
+}
+
+// -----------------------------------------------------------------------------
+// Registration with bun:test
+// -----------------------------------------------------------------------------
+
+function bunTest() {
+  return jest(Bun.main);
+}
+
+function bunTestOptions(options: TestOptions) {
+  // The node-style timeout is enforced by executeTestNode itself so that a
+  // tiny timeout (e.g. 1ms) with a synchronous body still passes like in Node.
+  // bun:test's own watchdog measures the whole wrapper, so it is only told
+  // about timeouts that extend past its 5s default.
+  const { timeout } = options;
+  if (typeof timeout === "number" && Number.isFinite(timeout) && timeout > 5_000) {
+    return { timeout };
+  }
+  return undefined;
+}
+
+function currentCollectionParent(): TestNode {
+  const node = currentNode();
+  if (node !== undefined && !node.isExecutionPhase && node.isSuite) {
+    return node;
+  }
+  return getRootNode();
+}
+
+function createTopLevelTestRunner(node: TestNode, fn: TestFn, resolveDeferred: (() => void) | undefined) {
+  // bun:test invokes this with a `done` callback because the function declares
+  // one parameter.
+  return (done: (error?: unknown) => void) => {
+    executeTestNode(node, fn).then(
+      failure => {
+        resolveDeferred?.();
+        done(failure === undefined ? undefined : failure);
+      },
+      err => {
+        resolveDeferred?.();
+        done(err);
+      },
+    );
+  };
+}
+
+function addTest(
+  arg0: unknown,
+  arg1: unknown,
+  arg2: unknown,
+  executionParent: TestNode | undefined,
+  mode?: "skip" | "todo" | "only",
+): Promise<undefined> {
+  const { name, options, fn } = parseTestArgs(arg0, arg1, arg2);
+  const { ownTags } = validateTestOptions(options);
+
+  const runningNode = executionParent ?? currentNode();
+  if (runningNode !== undefined && runningNode.isRunning()) {
+    // Subtest of a running test (or of an inline suite created inside one).
+    if (mode === "skip" || options.skip) {
+      return Promise.resolve(undefined);
+    }
+    const child = new TestNode(name, runningNode, options, false, true);
+    child.ownTags = ownTags;
+    if (mode === "todo") child.todoFlag = true;
+    return scheduleSubtest(runningNode, child, fn);
+  }
+
+  // Collection phase: register with bun:test.
+  const parent = currentCollectionParent();
+  const node = new TestNode(name, parent, options, false, false);
+  node.ownTags = ownTags;
+
+  const { test } = bunTest();
+  const insideSuite = parent.parent !== undefined;
+  const passOptions = bunTestOptions(options);
+
+  const effectiveMode = mode ?? (options.todo ? "todo" : options.skip ? "skip" : options.only ? "only" : undefined);
+
+  if (effectiveMode === "todo" || effectiveMode === "skip") {
+    const register = effectiveMode === "todo" ? test.todo : test.skip;
+    if (passOptions !== undefined) {
+      register(name, kDefaultFunction, passOptions);
+    } else {
+      register(name, kDefaultFunction);
+    }
+    return Promise.resolve(undefined);
+  }
+
+  let resolveDeferred: (() => void) | undefined;
+  let promise: Promise<undefined>;
+  if (insideSuite) {
+    // Inside a describe() callback Node returns an already-resolved promise.
+    promise = Promise.resolve(undefined);
+  } else {
+    promise = new Promise(resolve => {
+      resolveDeferred = () => resolve(undefined);
+    });
+  }
+
+  const runner = createTopLevelTestRunner(node, fn, resolveDeferred);
+  if (effectiveMode === "only") {
+    // Node's {only: true} is a no-op without --test-only, but test.only() is
+    // routed for explicit test.only() calls so name filtering still works.
+    if (mode === "only") {
+      if (passOptions !== undefined) {
+        test.only(name, runner, passOptions);
+      } else {
+        test.only(name, runner);
+      }
+    } else if (passOptions !== undefined) {
+      test(name, runner, passOptions);
+    } else {
+      test(name, runner);
+    }
+  } else if (passOptions !== undefined) {
+    test(name, runner, passOptions);
+  } else {
+    test(name, runner);
+  }
+
+  return promise;
+}
+
+function addSuite(
+  arg0: unknown,
+  arg1: unknown,
+  arg2: unknown,
+  executionParent?: TestNode,
+  mode?: "skip" | "todo" | "only",
+): Promise<undefined> {
+  const { name, options, fn } = parseTestArgs(arg0, arg1, arg2);
+  const { ownTags } = validateTestOptions(options);
+
+  const runningNode = executionParent ?? currentNode();
+  if (runningNode !== undefined && runningNode.isRunning()) {
+    const suite = new TestNode(name, runningNode, options, true, true);
+    suite.ownTags = ownTags;
+    if (mode === "skip" || options.skip) {
+      return Promise.resolve(undefined);
+    }
+    // Build the suite eagerly (Node also runs describe callbacks immediately),
+    // collecting children onto the suite's own subtest chain.
+    try {
+      runWithNode(suite, () => fn(suite.getSuiteCtx()));
+    } catch (err) {
+      runningNode.failedSubtests++;
+      runningNode.firstSubtestError ??= err;
+      return Promise.resolve(undefined);
+    }
+    return scheduleSuiteSubtest(runningNode, suite);
+  }
+
+  const parent = currentCollectionParent();
+  const suiteNode = new TestNode(name, parent, options, true, false);
+  suiteNode.ownTags = ownTags;
+
+  const { describe } = bunTest();
+  const wrapped = () => {
+    return runWithNode(suiteNode, () => fn(suiteNode.getSuiteCtx()));
+  };
+
+  const effectiveMode = mode ?? (options.todo ? "todo" : options.skip ? "skip" : options.only ? "only" : undefined);
+  const passOptions = bunTestOptions(options);
+
+  let register: Function = describe;
+  if (effectiveMode === "skip") register = describe.skip;
+  else if (effectiveMode === "todo") register = describe.todo;
+  else if (effectiveMode === "only") register = describe.only;
+
+  if (passOptions !== undefined) {
+    register(name, wrapped, passOptions);
+  } else {
+    register(name, wrapped);
+  }
+  return Promise.resolve(undefined);
+}
+
+// -----------------------------------------------------------------------------
+// Public API
+// -----------------------------------------------------------------------------
+
+function test(arg0: unknown, arg1: unknown, arg2: unknown) {
+  return addTest(arg0, arg1, arg2, undefined);
+}
+
+test.skip = function (arg0: unknown, arg1: unknown, arg2: unknown) {
+  return addTest(arg0, arg1, arg2, undefined, "skip");
 };
 
-type HookOptions = {
-  signal?: AbortSignal;
-  timeout?: number;
+test.todo = function (arg0: unknown, arg1: unknown, arg2: unknown) {
+  return addTest(arg0, arg1, arg2, undefined, "todo");
 };
+
+test.only = function (arg0: unknown, arg1: unknown, arg2: unknown) {
+  return addTest(arg0, arg1, arg2, undefined, "only");
+};
+
+function describe(arg0: unknown, arg1: unknown, arg2: unknown) {
+  return addSuite(arg0, arg1, arg2, undefined);
+}
+
+describe.skip = function (arg0: unknown, arg1: unknown, arg2: unknown) {
+  return addSuite(arg0, arg1, arg2, undefined, "skip");
+};
+
+describe.todo = function (arg0: unknown, arg1: unknown, arg2: unknown) {
+  return addSuite(arg0, arg1, arg2, undefined, "todo");
+};
+
+describe.only = function (arg0: unknown, arg1: unknown, arg2: unknown) {
+  return addSuite(arg0, arg1, arg2, undefined, "only");
+};
+
+function hookOwner(): TestNode {
+  const node = currentNode();
+  if (node !== undefined) {
+    return node;
+  }
+  return getRootNode();
+}
+
+function hookArgFor(node: TestNode) {
+  return node.isSuite && node.parent !== undefined ? node.getSuiteCtx() : node.getCtx();
+}
+
+function before(arg0: unknown, arg1: unknown) {
+  const { fn } = createHook(arg0, arg1);
+  const owner = hookOwner();
+  if (owner.isRunning()) {
+    owner.hooks.before.push({ fn });
+    if (owner.started && !owner.finished) {
+      owner.subtestChain = owner.subtestChain.then(() => fn(hookArgFor(owner)));
+    }
+    return;
+  }
+  const { beforeAll } = bunTest();
+  beforeAll((done: (error?: unknown) => void) => {
+    Promise.resolve(runWithNode(owner, () => fn(hookArgFor(owner)))).then(
+      () => done(),
+      err => done(err ?? new Error("before hook failed")),
+    );
+  });
+}
+
+function after(arg0: unknown, arg1: unknown) {
+  const { fn } = createHook(arg0, arg1);
+  const owner = hookOwner();
+  if (owner.isRunning()) {
+    owner.hooks.after.push({ fn });
+    return;
+  }
+  const { afterAll } = bunTest();
+  afterAll((done: (error?: unknown) => void) => {
+    Promise.resolve(runWithNode(owner, () => fn(hookArgFor(owner)))).then(
+      () => done(),
+      err => done(err ?? new Error("after hook failed")),
+    );
+  });
+}
+
+function beforeEach(arg0: unknown, arg1: unknown) {
+  const { fn } = createHook(arg0, arg1);
+  const owner = hookOwner();
+  owner.hooks.beforeEach.push({ fn });
+}
+
+function afterEach(arg0: unknown, arg1: unknown) {
+  const { fn } = createHook(arg0, arg1);
+  const owner = hookOwner();
+  owner.hooks.afterEach.push({ fn });
+}
 
 function setDefaultSnapshotSerializer(_serializers: unknown[]) {
   throwNotImplemented("setDefaultSnapshotSerializer()", 5090, "Use `bun:test` in the interim.");
@@ -797,5 +1662,6 @@ test.snapshot = {
 };
 test.run = run;
 test.mock = mock;
+test.getTestContext = getTestContext;
 
 export default test;

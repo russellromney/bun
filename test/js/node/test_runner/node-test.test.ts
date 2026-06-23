@@ -45,7 +45,7 @@ describe("node:test", () => {
     });
   });
 
-  test("should throw NotImplementedError if you call test() or describe() inside another test()", async () => {
+  test("should run test() and describe() called inside another test() as subtests", async () => {
     const { exitCode, stderr } = await runTests(["05-test-in-test.js"]);
     expect({ exitCode, stderr }).toMatchObject({
       exitCode: 0,
