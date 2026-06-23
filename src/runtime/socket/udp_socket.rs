@@ -1962,18 +1962,25 @@ fn dgram_not_supported(global: &JSGlobalObject) -> bun_jsc::JsError {
     )
 }
 
-/// `(isIPv6)` → a fresh unbound SOCK_DGRAM descriptor (CLOEXEC + non-blocking).
+/// `(isIPv6, isStream)` → a fresh unbound SOCK_DGRAM (or SOCK_STREAM)
+/// descriptor (CLOEXEC + non-blocking).
 #[bun_jsc::host_fn]
 pub fn js_dgram_new_socket_fd(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
     #[cfg(not(windows))]
     {
         let is_v6 = frame.argument(0).to_boolean();
+        let is_stream = frame.argument(1).to_boolean();
         let domain = if is_v6 { libc::AF_INET6 } else { libc::AF_INET };
+        let sock_type = if is_stream {
+            libc::SOCK_STREAM
+        } else {
+            libc::SOCK_DGRAM
+        };
         // SAFETY: plain socket(2); no pointers involved.
         let fd = unsafe {
             libc::socket(
                 domain,
-                libc::SOCK_DGRAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                sock_type | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
                 0,
             )
         };
@@ -2214,6 +2221,27 @@ pub fn js_dgram_guess_handle_type(global: &JSGlobalObject, frame: &CallFrame) ->
         }
     };
     BunString::static_(kind.as_bytes()).to_js(global)
+}
+
+/// `(fd)` → puts a stream descriptor created by `js_dgram_new_socket_fd` into
+/// the listening state (auto-binding to an ephemeral port if unbound).
+#[bun_jsc::host_fn]
+pub fn js_dgram_listen_fd(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
+    #[cfg(not(windows))]
+    {
+        let fd = dgram_owned_fd_arg(global, frame.argument(0))?;
+        // SAFETY: listen(2) on a descriptor this module created.
+        if unsafe { libc::listen(fd, 511) } != 0 {
+            let err = bun_sys::Error::from_code_int(bun_sys::last_errno(), bun_sys::Tag::listen);
+            return Err(global.throw_value(err.to_js(global)));
+        }
+        Ok(JSValue::UNDEFINED)
+    }
+    #[cfg(windows)]
+    {
+        let _ = frame;
+        Err(dgram_not_supported(global))
+    }
 }
 
 /// `(fd)` → closes a raw descriptor created by `js_dgram_new_socket_fd`.
