@@ -385,8 +385,12 @@ void us_loop_run_bun_tick(struct us_loop_t *loop, const struct timespec* timeout
 
     /* Measure time blocked in the event provider for
      * performance.eventLoopUtilization(). Only count a real idle wait (non-zero
-     * timeout, no pending wakeups); a zero-timeout poll-through is not idle. */
+     * timeout, no pending wakeups); a zero-timeout poll-through is not idle.
+     * Publish the wait's start so a cross-thread reader can credit the
+     * in-progress wait to idle instead of active (mirrors libuv). */
     const uint64_t idle_start_ns = will_idle_inside_event_loop ? us_loop_monotonic_ns() : 0;
+    if (will_idle_inside_event_loop)
+        __atomic_store_n(&loop->data.idle_entry_ns, idle_start_ns, __ATOMIC_RELEASE);
 
     /* Fetch ready polls */
 #ifdef LIBUS_USE_EPOLL
@@ -410,6 +414,9 @@ void us_loop_run_bun_tick(struct us_loop_t *loop, const struct timespec* timeout
 
     if (will_idle_inside_event_loop) {
         const uint64_t idle_end_ns = us_loop_monotonic_ns();
+        /* Clear the in-progress marker before crediting the total, so a reader
+         * never sees both (which would double-count the just-finished wait). */
+        __atomic_store_n(&loop->data.idle_entry_ns, 0, __ATOMIC_RELEASE);
         if (idle_end_ns > idle_start_ns)
             __atomic_add_fetch(&loop->data.idle_time_ns, idle_end_ns - idle_start_ns, __ATOMIC_RELAXED);
     }

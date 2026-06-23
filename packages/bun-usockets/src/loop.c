@@ -50,13 +50,20 @@ void us_loop_event_loop_utilization(struct us_loop_t *loop, uint64_t *idle_ns_ou
         *active_ns_out = 0;
         return;
     }
+    uint64_t now_ns = us_loop_monotonic_ns();
 #ifdef LIBUS_USE_LIBUV
+    /* libuv folds any in-progress provider wait into this value itself. */
     uint64_t idle_ns = uv_metrics_idle_time(loop->uv_loop);
 #else
     uint64_t idle_ns = __atomic_load_n(&loop->data.idle_time_ns, __ATOMIC_RELAXED);
+    /* If the loop is blocked in the provider right now, credit the elapsed part
+     * of that wait to idle (it is not yet added to idle_time_ns). Without this a
+     * loop sampled mid-wait looks fully active. */
+    uint64_t idle_entry_ns = __atomic_load_n(&loop->data.idle_entry_ns, __ATOMIC_ACQUIRE);
+    if (idle_entry_ns != 0 && now_ns > idle_entry_ns)
+        idle_ns += now_ns - idle_entry_ns;
 #endif
     uint64_t created_ns = loop->data.creation_monotonic_ns;
-    uint64_t now_ns = us_loop_monotonic_ns();
     uint64_t elapsed_ns = (created_ns && now_ns > created_ns) ? (now_ns - created_ns) : 0;
     *idle_ns_out = idle_ns;
     *active_ns_out = elapsed_ns > idle_ns ? elapsed_ns - idle_ns : 0;

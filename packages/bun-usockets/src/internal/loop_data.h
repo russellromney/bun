@@ -90,6 +90,12 @@ struct us_internal_loop_data_t {
      * Windows the idle time comes from uv_metrics_idle_time() instead, so this
      * field is left at zero there. */
     uint64_t idle_time_ns;
+    /* Monotonic timestamp (ns) of an in-progress provider wait, or 0 when not
+     * waiting. Lets a cross-thread reader credit the currently-blocked wait to
+     * idle instead of active (mirrors libuv's provider_entry_time). Written
+     * with __atomic_* by the owning thread around the epoll/kevent syscall;
+     * unused on Windows (uv_metrics_idle_time already accounts for it). */
+    uint64_t idle_entry_ns;
 };
 
 #endif // LOOP_DATA_H

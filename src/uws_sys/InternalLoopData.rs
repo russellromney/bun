@@ -62,6 +62,10 @@ pub struct InternalLoopData {
     /// C with `__atomic_*`. Read via `us_loop_event_loop_utilization`, not
     /// directly. Zero on Windows (libuv's `uv_metrics_idle_time` is used there).
     pub idle_time_ns: u64,
+    /// Monotonic ns of an in-progress provider wait (0 when not waiting), so a
+    /// cross-thread reader credits the currently-blocked wait to idle. Written
+    /// by C around the epoll/kevent syscall; unused on Windows.
+    pub idle_entry_ns: u64,
 }
 
 impl InternalLoopData {

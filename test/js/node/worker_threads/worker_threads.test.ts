@@ -702,3 +702,38 @@ test("worker.performance.eventLoopUtilization() returns zeros (not negatives) af
     if (!terminated) await worker.terminate();
   }
 });
+
+// https://github.com/oven-sh/bun/issues/32609
+test("worker.performance.eventLoopUtilization() reports low utilization for an idle worker", async () => {
+  using dir = tempDir("wt-elu-idle", {
+    "worker.mjs": `
+      import { parentPort } from "worker_threads";
+      // Stay alive but idle: blocked in the event provider waiting for messages.
+      parentPort.on("message", () => {});
+      parentPort.postMessage("ready");
+    `,
+  });
+
+  const worker = new Worker(join(String(dir), "worker.mjs"));
+  let terminated = false;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      worker.once("message", () => resolve());
+      worker.once("error", reject);
+    });
+    const elu1 = worker.performance.eventLoopUtilization();
+    await Bun.sleep(200);
+    const elu2 = worker.performance.eventLoopUtilization(elu1);
+
+    // The worker spends the whole window blocked in the event provider. That
+    // in-progress wait must count as idle, not active, even though it hasn't
+    // returned yet when the parent samples it.
+    expect(elu2.idle).toBeGreaterThan(50);
+    expect(elu2.utilization).toBeLessThan(0.5);
+
+    await worker.terminate();
+    terminated = true;
+  } finally {
+    if (!terminated) await worker.terminate();
+  }
+});
