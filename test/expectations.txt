@@ -280,3 +280,14 @@ test/js/node/test/parallel/test-http2-pipe.js [ FLAKY ]
 # node:http servers cannot listen on Windows named pipes yet (ENOENT from
 # uv_pipe bind), so common.PIPE-based http tests cannot run there.
 [ WINDOWS ] test/js/node/test/parallel/test-http-unix-socket-keep-alive.js [ FAIL ] # named-pipe listen unsupported
+
+# Buffer tests vendored verbatim from node v26.3.0 that exercise node-internal or V8/engine-specific machinery
+# requires --expose-internals debug-build allocator counters (internalBinding('debug').getGenericUsageCount)
+test/js/node/test/parallel/test-buffer-alloc-unsafe-is-uninitialized.js [ FAIL ]
+test/js/node/test/parallel/test-buffer-alloc-unsafe-is-initialized-with-zero-fill-flag.js [ FAIL ]
+# uses V8 natives syntax (--allow-natives-syntax %OptimizeFunctionOnNextCall) and internalBinding('debug') fast-API call counters
+test/js/node/test/parallel/test-buffer-swap-fast.js [ FAIL ]
+# Buffer.prototype in Bun exposes extra helper methods (readDouble(offset, le), utf16leSlice, ...) and Symbol.species that node does not
+test/js/node/test/parallel/test-buffer-generic-methods.js [ FAIL ]
+# Buffers are limited to 2**32 bytes (JSC MAX_ARRAY_BUFFER_SIZE), cannot allocate the 4GB+20 buffer this needs
+test/js/node/test/parallel/test-buffer-tostring-4gb.js [ FAIL ]
