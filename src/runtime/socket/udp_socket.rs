@@ -1919,6 +1919,30 @@ impl UDPSocket {
 // matching Node's cluster behavior for shared dgram handles.
 
 #[cfg(not(windows))]
+fn dgram_owned_fds() -> &'static std::sync::Mutex<std::collections::HashSet<c_int>> {
+    // Descriptors created by `js_dgram_new_socket_fd` and not yet closed. The
+    // helpers that mutate or close a descriptor refuse anything this module
+    // did not create, so builtin JS cannot be tricked into operating on an
+    // unrelated descriptor. A Mutex because each worker thread has its own JS
+    // thread in the same process.
+    static OWNED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<c_int>>> =
+        std::sync::OnceLock::new();
+    OWNED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+#[cfg(not(windows))]
+fn dgram_owned_fd_arg(global: &JSGlobalObject, value: JSValue) -> JsResult<c_int> {
+    let fd = dgram_fd_arg(global, value)?;
+    if !dgram_owned_fds().lock().unwrap().contains(&fd) {
+        return Err(global.throw_value(
+            bun_sys::Error::from_code_int(SystemErrno::EBADF as c_int, bun_sys::Tag::open)
+                .to_js(global),
+        ));
+    }
+    Ok(fd)
+}
+
+#[cfg(not(windows))]
 fn dgram_fd_arg(global: &JSGlobalObject, value: JSValue) -> JsResult<c_int> {
     let fd = value.coerce_to_i32(global)?;
     if fd < 0 {
@@ -1957,6 +1981,7 @@ pub fn js_dgram_new_socket_fd(global: &JSGlobalObject, frame: &CallFrame) -> JsR
             let err = bun_sys::Error::from_code_int(bun_sys::last_errno(), bun_sys::Tag::open);
             return Err(global.throw_value(err.to_js(global)));
         }
+        dgram_owned_fds().lock().unwrap().insert(fd);
         Ok(JSValue::js_number_from_int32(fd))
     }
     #[cfg(windows)]
@@ -1972,7 +1997,7 @@ pub fn js_dgram_new_socket_fd(global: &JSGlobalObject, frame: &CallFrame) -> JsR
 pub fn js_dgram_bind_fd(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
     #[cfg(not(windows))]
     {
-        let fd = dgram_fd_arg(global, frame.argument(0))?;
+        let fd = dgram_owned_fd_arg(global, frame.argument(0))?;
         let address = bun_core::OwnedString::new(frame.argument(1).to_bun_string(global)?);
         let address_z = address.to_owned_slice_z();
         let port_num = frame.argument(2).coerce_to_i32(global)?;
@@ -2070,7 +2095,7 @@ pub fn js_dgram_bind_fd(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<
 pub fn js_dgram_getsockname_fd(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
     #[cfg(not(windows))]
     {
-        let fd = dgram_fd_arg(global, frame.argument(0))?;
+        let fd = dgram_owned_fd_arg(global, frame.argument(0))?;
         let mut storage: sockaddr_storage = bun_core::ffi::zeroed();
         let mut len = size_of::<sockaddr_storage>() as libc::socklen_t;
         // SAFETY: getsockname(2) writes at most `len` bytes into storage.
@@ -2197,8 +2222,8 @@ pub fn js_dgram_close_fd(global: &JSGlobalObject, frame: &CallFrame) -> JsResult
     #[cfg(not(windows))]
     {
         let fd = frame.argument(0).coerce_to_i32(global)?;
-        if fd >= 0 {
-            // SAFETY: close(2); ownership of the descriptor belongs to the caller.
+        if fd >= 0 && dgram_owned_fds().lock().unwrap().remove(&fd) {
+            // SAFETY: close(2) on a descriptor this module created and still owned.
             unsafe { libc::close(fd) };
         }
         Ok(JSValue::UNDEFINED)
