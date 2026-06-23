@@ -40,7 +40,7 @@ const enum uSockets {
   LISTEN_DISALLOW_REUSE_PORT_FAILURE = 32,
 }
 
-const { kStateSymbol } = require("internal/dgram");
+const { kStateSymbol, guessHandleType } = require("internal/dgram");
 const kOwnerSymbol = Symbol("owner symbol");
 const async_id_symbol = Symbol("async_id_symbol");
 
@@ -115,9 +115,17 @@ function isInt32(value) {
   return value === (value | 0);
 }
 
-// libuv-style negative errno used where Node reports uv error codes (EBADF is 9
-// on every supported POSIX platform; Windows uses libuv's own UV_EBADF value).
+// libuv-style negative errnos used where Node reports uv error codes (the POSIX
+// values match every supported platform; Windows uses libuv's own values).
 const UV_EBADF = process.platform === "win32" ? -4083 : -9;
+const UV_EEXIST = process.platform === "win32" ? -4075 : -17;
+
+const getFdFn = $newZigFunction("udp_socket.zig", "UDPSocket.jsGetFd", 0);
+
+// Descriptors currently owned by live sockets of this module. libuv keeps the
+// same loop-wide bookkeeping so that adopting a descriptor another handle
+// already owns fails with EEXIST instead of double-polling it.
+const kBoundFds = new Set();
 
 let BlockList;
 function isBlockList(value) {
@@ -166,6 +174,9 @@ function newHandle(type, lookup) {
     send: handleSend,
     getSendQueueSize: handleGetSendQueueSize,
     getSendQueueCount: handleGetSendQueueCount,
+    get fd() {
+      return this.socket ? getFdFn.$call(this.socket) : -1;
+    },
   };
   if (type === "udp4") {
     handle.lookup = FunctionPrototypeBind.$call(lookup4, handle, lookup);
@@ -412,24 +423,20 @@ Socket.prototype.bind = function (port_, address_ /* , callback */) {
   }
 
   // Open an existing fd instead of creating a new one.
-  if (port !== null && typeof port === "object" && isInt32(port.fd) && port.fd > 0) {
-    throwNotImplemented("Socket.prototype.bind({ fd })");
-    /*
-    const fd = port.fd;
-    const exclusive = !!port.exclusive;
-    const state = this[kStateSymbol];
-
+  const fd = port !== null && typeof port === "object" ? port.fd : undefined;
+  if (isInt32(fd) && fd > 0) {
     const type = guessHandleType(fd);
-    if (type !== 'UDP')
-      throw new ERR_INVALID_FD_TYPE(type);
-    const err = state.handle.open(fd);
+    if (type !== "UDP") {
+      throw $ERR_INVALID_FD_TYPE(type);
+    }
+    if (kBoundFds.has(fd)) {
+      // Another live socket of this module already owns the descriptor, like
+      // libuv's UV_EEXIST from uv_udp_open().
+      throw new ErrnoException(UV_EEXIST, "open");
+    }
 
-    if (err)
-      throw new ErrnoException(err, 'open');
-
-    startListening(this);
+    startBunSocket(this, state, { fd });
     return this;
-    */
   }
 
   let address;
@@ -471,72 +478,83 @@ Socket.prototype.bind = function (port_, address_ /* , callback */) {
       flags |= uSockets.LISTEN_REUSE_PORT;
     }
 
-    // TODO flags
-    const family = this.type === "udp4" ? "IPv4" : "IPv6";
-    const familyLower = this.type === "udp4" ? "ipv4" : "ipv6";
-    try {
-      Bun.udpSocket({
-        hostname: ip,
-        port: port || 0,
-        flags,
-        socket: {
-          data: (_socket, data, port, address) => {
-            if (state.receiveBlockList?.check(address, familyLower)) {
-              return;
-            }
-            this.emit("message", data, {
-              port: port,
-              address: address,
-              size: data.length,
-              // TODO check if this is correct
-              family,
-            });
-          },
-          error: error => {
-            // Bun.udpSocket surfaces ICMP errors (IP_RECVERR) on the next
-            // receive; Node's unconnected sockets never see them because the
-            // kernel only queues those errors for connected sockets.
-            if (error?.syscall === "recv" && state.connectState !== CONNECT_STATE_CONNECTED) {
-              return;
-            }
-            this.emit("error", error);
-          },
-        },
-      }).$then(
-        socket => {
-          if (state.unrefOnBind) {
-            socket.unref();
-            state.unrefOnBind = false;
-          }
-          state.handle.socket = socket;
-          state.receiving = true;
-          state.bindState = BIND_STATE_BOUND;
-
-          // Node applies these in startListening(), before 'listening' fires.
-          const { recvBufferSize, sendBufferSize } = state;
-          try {
-            if (recvBufferSize) bufferSize(this, recvBufferSize, RECV_BUFFER);
-            if (sendBufferSize) bufferSize(this, sendBufferSize, SEND_BUFFER);
-          } catch (err) {
-            this.emit("error", err);
-            return;
-          }
-
-          this.emit("listening");
-        },
-        err => {
-          state.bindState = BIND_STATE_UNBOUND;
-          this.emit("error", err);
-        },
-      );
-    } catch (err) {
-      state.bindState = BIND_STATE_UNBOUND;
-      this.emit("error", err);
-    }
+    startBunSocket(this, state, { hostname: ip, port: port || 0, flags });
   });
 
   return this;
 };
+
+// Creates the underlying Bun.udpSocket for `self` and completes the bind:
+// either from a resolved hostname/port or by adopting an existing descriptor
+// (`{ fd }`). Mirrors what Node's startListening() makes observable before
+// 'listening' fires.
+function startBunSocket(self, state, createOptions) {
+  const family = self.type === "udp4" ? "IPv4" : "IPv6";
+  const familyLower = self.type === "udp4" ? "ipv4" : "ipv6";
+  try {
+    Bun.udpSocket({
+      ...createOptions,
+      socket: {
+        data: (_socket, data, port, address) => {
+          if (state.receiveBlockList?.check(address, familyLower)) {
+            return;
+          }
+          self.emit("message", data, {
+            port: port,
+            address: address,
+            size: data.length,
+            // TODO check if this is correct
+            family,
+          });
+        },
+        error: error => {
+          // Bun.udpSocket surfaces ICMP errors (IP_RECVERR) on the next
+          // receive; Node's unconnected sockets never see them because the
+          // kernel only queues those errors for connected sockets.
+          if (error?.syscall === "recv" && state.connectState !== CONNECT_STATE_CONNECTED) {
+            return;
+          }
+          self.emit("error", error);
+        },
+      },
+    }).$then(
+      socket => {
+        if (!state.handle) {
+          // Closed while the bind was in flight.
+          socket.close();
+          return;
+        }
+        if (state.unrefOnBind) {
+          socket.unref();
+          state.unrefOnBind = false;
+        }
+        state.handle.socket = socket;
+        state.receiving = true;
+        state.bindState = BIND_STATE_BOUND;
+        kBoundFds.add(state.handle.fd);
+
+        // Node applies these in startListening(), before 'listening' fires.
+        const { recvBufferSize, sendBufferSize } = state;
+        try {
+          if (recvBufferSize) bufferSize(self, recvBufferSize, RECV_BUFFER);
+          if (sendBufferSize) bufferSize(self, sendBufferSize, SEND_BUFFER);
+        } catch (err) {
+          self.emit("error", err);
+          return;
+        }
+
+        self.emit("listening");
+      },
+      err => {
+        state.bindState = BIND_STATE_UNBOUND;
+        self.emit("error", err);
+      },
+    );
+  } catch (err) {
+    state.bindState = BIND_STATE_UNBOUND;
+    self.emit("error", err);
+  }
+}
 
 Socket.prototype.connect = function (port, address, callback) {
   port = validatePort(port, "Port", false);
@@ -848,6 +866,7 @@ Socket.prototype.close = function (callback) {
   }
 
   state.receiving = false;
+  kBoundFds.delete(state.handle.fd);
   state.handle.socket?.close();
   state.handle = null;
   defaultTriggerAsyncIdScope(this[async_id_symbol], process.nextTick, socketCloseNT, this);

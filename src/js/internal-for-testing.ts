@@ -222,7 +222,8 @@ export const exposedInternals = {
   "internal/async_hooks": require("internal/async_hooks"),
   "internal/dgram": require("internal/dgram"),
   // Node tests reach internalBinding() through internal/test/binding; serve the
-  // small constant surface they consume (libuv error codes).
+  // small surface they consume (libuv error codes, the UDP handle wrap, and a
+  // minimal TCP wrap used to verify dgram rejects non-datagram descriptors).
   "internal/test/binding": {
     internalBinding(name: string) {
       if (name === "uv") {
@@ -235,10 +236,50 @@ export const exposedInternals = {
           UV_ENOTSOCK: isWindows ? -4056 : -errno.ENOTSOCK,
         };
       }
+      if (name === "udp_wrap") {
+        return { UDP: require("internal/dgram").UDP };
+      }
+      if (name === "tcp_wrap") {
+        return { TCP: TestTCPWrap, constants: { SOCKET: 0, SERVER: 1 } };
+      }
       throw new Error(`internalBinding(${JSON.stringify(name)}) is not exposed in Bun`);
     },
   },
 };
+
+const newRawSocketFd = $newZigFunction("udp_socket.zig", "jsDgramNewSocketFd", 2);
+const listenRawFd = $newZigFunction("udp_socket.zig", "jsDgramListenFd", 1);
+const closeRawFd = $newZigFunction("udp_socket.zig", "jsDgramCloseFd", 1);
+
+// Just enough of internalBinding('tcp_wrap').TCP for vendored dgram tests to
+// produce a listening stream descriptor and assert it gets rejected.
+class TestTCPWrap {
+  #fd = -1;
+
+  constructor(_type: number) {
+    this.#fd = newRawSocketFd(false, true);
+  }
+
+  get fd() {
+    return this.#fd;
+  }
+
+  listen() {
+    try {
+      listenRawFd(this.#fd);
+      return 0;
+    } catch (err) {
+      return typeof err?.errno === "number" && err.errno < 0 ? err.errno : -1;
+    }
+  }
+
+  close() {
+    if (this.#fd >= 0) {
+      closeRawFd(this.#fd);
+      this.#fd = -1;
+    }
+  }
+}
 
 export const fs = require("node:fs/promises").$data;
 

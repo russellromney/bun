@@ -2099,7 +2099,7 @@ pub fn js_dgram_bind_fd(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<
 
 /// `(fd)` → `{ address, port, family }` of a raw descriptor's local address.
 #[bun_jsc::host_fn]
-pub fn js_dgram_getsockname_fd(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
+pub fn js_dgram_get_sock_name_fd(global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
     #[cfg(not(windows))]
     {
         let fd = dgram_owned_fd_arg(global, frame.argument(0))?;
