@@ -777,9 +777,13 @@ const ServerHandlers: SocketHandler<NetSocket> = {
         err = tlsHandshakeError(verifyError);
       }
       self.emit("_tlsError", err);
-      server?.emit("tlsClientError", err, self);
+      // error before handshake on a server-owned socket is only reported via
+      // 'tlsClientError'; a standalone `new tls.TLSSocket(socket, { isServer:
+      // true })` has no server, and Node delivers the failure as an 'error'
+      // event on the socket itself (control is already released to the user).
+      if (server) server.emit("tlsClientError", err, self);
+      else self.emit("error", err);
       self._hadError = true;
-      // error before handshake on the server side will only be emitted using tlsClientError
       self.destroy();
       return;
     }
@@ -805,21 +809,38 @@ const ServerHandlers: SocketHandler<NetSocket> = {
         }
       } else {
         self.authorized = true;
+        // Node reports a clean client-certificate verification as an explicit
+        // null, not an absent property.
+        self.authorizationError = null;
       }
     }
-    if (server) {
-      const connectionListener = server[bunSocketServerOptions]?.connectionListener;
-      if (typeof connectionListener === "function") {
-        server.prependOnceListener("secureConnection", connectionListener);
-      }
-      server.emit("secureConnection", self);
-    }
-    // after secureConnection event we emmit secure and secureConnect
-    self.emit("secure", self);
-    self.emit("secureConnect", verifyError);
-    if (server?.pauseOnConnect) {
+    // pauseOnConnect sockets must already be paused when the
+    // 'secureConnection' listener observes them, like Node.
+    const pauseOnConnect = server && (server.pauseOnConnect ?? server[bunSocketServerOptions]?.pauseOnConnect);
+    if (pauseOnConnect) {
       self.pause();
-    } else {
+    }
+    // A throw from a 'secureConnection'/'secure'/'secureConnect' listener must
+    // crash the process like Node (the native dispatcher would otherwise route
+    // it into the socket error handler and silently swallow the exception).
+    try {
+      if (server) {
+        const connectionListener = server[bunSocketServerOptions]?.connectionListener;
+        if (typeof connectionListener === "function") {
+          server.prependOnceListener("secureConnection", connectionListener);
+        }
+        server.emit("secureConnection", self);
+      }
+      // after secureConnection event we emmit secure and secureConnect
+      self.emit("secure", self);
+      self.emit("secureConnect", verifyError);
+    } catch (err) {
+      process.nextTick(() => {
+        throw err;
+      });
+      return;
+    }
+    if (!pauseOnConnect) {
       self.resume();
     }
   },
@@ -943,7 +964,11 @@ function onconnection(err, clientHandle) {
   _socket.server = self;
   _socket._server = self;
 
-  if (pauseOnConnect) {
+  // A TLS server's handshake is driven by the native read path; pausing the
+  // raw handle before the handshake would stall the ClientHello forever. The
+  // decrypted stream is paused after the handshake instead (see
+  // ServerHandlers.handshake).
+  if (pauseOnConnect && !isTLS) {
     _socket.pause();
   }
 
@@ -1993,26 +2018,37 @@ Socket.prototype[Symbol.for("::bunUpgradeServerTLS::")] = function (connection, 
     return;
   }
   this[kupgraded] = connection;
-  // Bytes that already arrived before the wrap (e.g. the ClientHello) were
-  // pulled off the fd into the connection's readable buffer; hand them to the
-  // TLS engine so the handshake doesn't stall.
-  const pending = connection.read();
-  const result = socket.upgradeTLS({
-    data: this,
-    tls,
-    socket: serverHandlersFor(this),
-    isServer: true,
-    initialData: pending || undefined,
+  // Adopt the fd one tick later: feeding bytes that already arrived (e.g. the
+  // ClientHello, or junk) inside the constructor would deliver handshake
+  // results before the caller had a chance to attach 'error'/'secure'
+  // listeners — Node reads the wrapped stream asynchronously, so its handshake
+  // outcomes are never observable during construction.
+  process.nextTick(() => {
+    if (this.destroyed || connection.destroyed) return;
+    const handle = connection._handle;
+    if (!handle) return;
+    // Bytes that already arrived before the wrap were pulled off the fd into
+    // the connection's readable buffer; hand them to the TLS engine so the
+    // handshake doesn't stall.
+    const pending = connection.read();
+    const result = handle.upgradeTLS({
+      data: this,
+      tls,
+      socket: serverHandlersFor(this),
+      isServer: true,
+      initialData: pending || undefined,
+    });
+    if (!result) {
+      this._handle = null;
+      this.destroy(new Error("Invalid socket"));
+      return;
+    }
+    const [raw, tlsHandle] = result;
+    connection._handle = raw;
+    this.once("end", this[kCloseRawConnection]);
+    raw.connecting = false;
+    this._handle = tlsHandle;
   });
-  if (!result) {
-    this._handle = null;
-    throw new Error("Invalid socket");
-  }
-  const [raw, tlsHandle] = result;
-  connection._handle = raw;
-  this.once("end", this[kCloseRawConnection]);
-  raw.connecting = false;
-  this._handle = tlsHandle;
 };
 
 Socket.prototype.read = function read(size) {

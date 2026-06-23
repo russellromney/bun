@@ -10,6 +10,7 @@ const {
   validateString,
   validateNumber,
   validateUint32,
+  validateInt32,
   validateBuffer,
   validateFunction,
 } = require("internal/validators");
@@ -737,7 +738,11 @@ function translatePeerCertificate(c) {
   return c;
 }
 
+// OpenSSL/BoringSSL SSL_OP_CIPHER_SERVER_PREFERENCE (vendor/boringssl/include/openssl/ssl.h).
+const SSL_OP_CIPHER_SERVER_PREFERENCE = 0x00400000;
+
 const ksecureContext = Symbol("ksecureContext");
+const kserverTLSOptions = Symbol("kserverTLSOptions");
 const kcheckServerIdentity = Symbol("kcheckServerIdentity");
 const ksession = Symbol("ksession");
 const krenegotiationDisabled = Symbol("renegotiationDisabled");
@@ -1007,6 +1012,7 @@ TLSSocket.prototype.exportKeyingMaterial = function exportKeyingMaterial(length,
 };
 
 TLSSocket.prototype.setMaxSendFragment = function setMaxSendFragment(size) {
+  validateInt32(size, "size");
   return this._handle?.setMaxSendFragment?.(size) || false;
 };
 
@@ -1046,12 +1052,14 @@ TLSSocket.prototype.getPeerCertificate = function getPeerCertificate(detailed) {
 };
 
 TLSSocket.prototype.getCertificate = function getCertificate() {
-  // getCertificate is not yet implemented on the native socket
-  const cert = this._handle?.getCertificate?.();
+  if (!this._handle) return null;
+  const cert = this._handle.getCertificate?.();
   if (cert) {
     // It's not a peer cert, but the formatting is identical.
     return translatePeerCertificate(cert);
   }
+  // Like Node, a connection with no local certificate reports an empty object.
+  return {};
 };
 
 TLSSocket.prototype.getPeerX509Certificate = function getPeerX509Certificate() {
@@ -1181,6 +1189,9 @@ function Server(options, secureConnectionListener): void {
   };
 
   this.setSecureContext = function (options) {
+    // Kept for the STARTTLS 'connection' listener below, which wraps plain
+    // sockets with whatever credentials the server currently uses.
+    this[kserverTLSOptions] = options;
     if (options instanceof InternalSecureContext) {
       options = options.context;
     }
@@ -1285,6 +1296,9 @@ function Server(options, secureConnectionListener): void {
       if (secureOptions && typeof secureOptions !== "number") {
         throw $ERR_INVALID_ARG_TYPE("options.secureOptions", "number", secureOptions);
       }
+      // Node's server honors its own cipher order unless honorCipherOrder is
+      // explicitly disabled; it reaches OpenSSL as a context option.
+      if (options.honorCipherOrder !== false) secureOptions |= SSL_OP_CIPHER_SERVER_PREFERENCE;
       this.secureOptions = secureOptions;
 
       const requestCert = options.requestCert || false;
@@ -1383,6 +1397,28 @@ function Server(options, secureConnectionListener): void {
   const handshakeTimeout = (options && options.handshakeTimeout) || 120 * 1000;
   validateNumber(handshakeTimeout, "options.handshakeTimeout");
   this._handshakeTimeout = handshakeTimeout;
+
+  // Node's tls.Server uses its net.Server connection listener to upgrade plain
+  // sockets handed in via `server.emit('connection', socket)` (the STARTTLS
+  // pattern). Sockets accepted by Bun's native listener are already TLSSockets
+  // and skip the wrap.
+  this.on("connection", socket => {
+    if (!socket || socket.encrypted || socket instanceof TLSSocket) return;
+    const ctxOptions = this[kserverTLSOptions];
+    const secureContext =
+      ctxOptions instanceof InternalSecureContext ? ctxOptions : createSecureContext(ctxOptions || {});
+    const wrapped = new TLSSocket(socket, {
+      isServer: true,
+      secureContext,
+      requestCert: this._requestCert,
+      rejectUnauthorized: this._rejectUnauthorized,
+      SNICallback: this._SNICallback,
+      ALPNProtocols: this.ALPNProtocols,
+    });
+    wrapped.server = this;
+    wrapped._requestCert = this._requestCert;
+    wrapped._rejectUnauthorized = this._rejectUnauthorized;
+  });
 }
 $toClass(Server, "Server", NetServer);
 
@@ -1454,6 +1490,13 @@ function connect(...args) {
   }
 
   const tlssock = new TLSSocket(options);
+  // tls.connect() is secure by default: it rejects unauthorized peers unless
+  // the caller explicitly passed rejectUnauthorized (the bare TLSSocket
+  // constructor defaults the field to the caller's value, i.e. false when
+  // omitted).
+  if (options.rejectUnauthorized === undefined) {
+    tlssock._rejectUnauthorized = rejectUnauthorizedDefault();
+  }
   // Honor the `timeout` option here: Socket.prototype.connect does not (only
   // the net.createConnection factory does), so tls.connect applies it
   // explicitly, exactly like Node's tls connect.

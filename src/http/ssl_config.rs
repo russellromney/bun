@@ -211,6 +211,7 @@ impl SSLConfig {
         ctx_opts.reject_unauthorized = self.reject_unauthorized;
         ctx_opts.ssl_min_version = self.ssl_min_version;
         ctx_opts.ssl_max_version = self.ssl_max_version;
+        ctx_opts.secure_options = self.secure_options;
 
         ctx_opts
     }
