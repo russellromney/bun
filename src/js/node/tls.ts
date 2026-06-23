@@ -710,8 +710,9 @@ var InternalSecureContext = class SecureContext {
     // BoringSSL's cipher-list parser has no notion of TLS 1.3 suite names —
     // Node configures those separately (and BoringSSL does not allow
     // overriding them), so they must not reach SSL_CTX_set_cipher_list.
-    if (options?.ciphers && StringPrototypeIncludes.$call(options.ciphers, "TLS_")) {
-      options = { ...options, ciphers: stripTls13CipherNames(options.ciphers) };
+    const requestedCiphers = options?.ciphers;
+    if (requestedCiphers && StringPrototypeIncludes.$call(requestedCiphers, "TLS_")) {
+      options = { ...options, ciphers: stripTls13CipherNames(requestedCiphers) };
     }
     // The native handle (SSL_CTX wrapper) is what's memoised — not this JS
     // object — so per-call fields like `servername` come from THIS call's
