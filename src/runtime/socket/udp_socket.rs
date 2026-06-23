@@ -1837,9 +1837,8 @@ impl UDPSocket {
         let size = args.ptr[0].coerce_to_i32(global_this)?;
         let is_recv = args.ptr[1].to_boolean();
 
-        let bad_fd = || {
-            bun_sys::Error::from_code_int(SystemErrno::EBADF as c_int, bun_sys::Tag::setsockopt)
-        };
+        let bad_fd =
+            || bun_sys::Error::from_code_int(SystemErrno::EBADF as c_int, bun_sys::Tag::setsockopt);
         if this.closed.get() {
             return Err(global_this.throw_value(bad_fd().to_js(global_this)));
         }
