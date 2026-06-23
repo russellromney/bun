@@ -980,9 +980,12 @@ function onconnection(err, clientHandle) {
   }
 
   self.emit("connection", _socket);
-  // the duplex implementation start paused, so we resume when pauseOnConnect is falsy
+  // Start pulling from the kernel without switching the stream into flowing
+  // mode: bytes that arrive before the user attaches a 'data' listener (or
+  // wraps the socket, e.g. in a delayed TLSSocket attach) must accumulate in
+  // the readable buffer like Node, not be emitted into the void.
   if (!pauseOnConnect && !isTLS) {
-    _socket.resume();
+    _socket.read(0);
   }
 }
 

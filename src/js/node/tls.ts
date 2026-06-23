@@ -26,171 +26,33 @@ const setTLSDefaultCiphers = $newCppFunction("NodeTLS.cpp", "setDefaultCiphers",
 let _VALID_CIPHERS_SET: Set<string> | undefined;
 function getValidCiphersSet() {
   if (!_VALID_CIPHERS_SET) {
+    // The TLS 1.2-and-below cipher suites BoringSSL can actually negotiate
+    // (vendor/boringssl/ssl/ssl_cipher.cc kCiphers). A cipher string whose
+    // entries match none of these produces an empty cipher list, which
+    // SSL_CTX_set_cipher_list reports as NO_CIPHER_MATCH.
     _VALID_CIPHERS_SET = new Set([
-      "EXP1024-RC4-MD5",
-      "EXP1024-RC2-CBC-MD5",
-      "EXP1024-DES-CBC-SHA",
-      "EXP1024-DHE-DSS-DES-CBC-SHA",
-      "EXP1024-RC4-SHA",
-      "EXP1024-DHE-DSS-RC4-SHA",
-      "DHE-DSS-RC4-SHA",
-
-      // AES ciphersuites from RFC 3268
+      "DES-CBC3-SHA",
       "AES128-SHA",
-      "DH-DSS-AES128-SHA",
-      "DH-RSA-AES128-SHA",
-      "DHE-DSS-AES128-SHA",
-      "DHE-RSA-AES128-SHA",
-      "ADH-AES128-SHA",
       "AES256-SHA",
-      "DH-DSS-AES256-SHA",
-      "DH-RSA-AES256-SHA",
-      "DHE-DSS-AES256-SHA",
-      "DHE-RSA-AES256-SHA",
-      "ADH-AES256-SHA",
-
-      // ECC ciphersuites from RFC 4492
-      "ECDH-ECDSA-NULL-SHA",
-      "ECDH-ECDSA-RC4-SHA",
-      "ECDH-ECDSA-DES-CBC3-SHA",
-      "ECDH-ECDSA-AES128-SHA",
-      "ECDH-ECDSA-AES256-SHA",
-      "ECDHE-ECDSA-NULL-SHA",
-      "ECDHE-ECDSA-RC4-SHA",
-      "ECDHE-ECDSA-DES-CBC3-SHA",
-      "ECDHE-ECDSA-AES128-SHA",
-      "ECDHE-ECDSA-AES256-SHA",
-
-      "ECDH-RSA-NULL-SHA",
-      "ECDH-RSA-RC4-SHA",
-      "ECDH-RSA-DES-CBC3-SHA",
-      "ECDH-RSA-AES128-SHA",
-      "ECDH-RSA-AES256-SHA",
-      "ECDHE-RSA-NULL-SHA",
-      "ECDHE-RSA-RC4-SHA",
-      "ECDHE-RSA-DES-CBC3-SHA",
-      "ECDHE-RSA-AES128-SHA",
-      "ECDHE-RSA-AES256-SHA",
-      "ECDHE-RSA-AES128-SHA256",
-      "AECDH-NULL-SHA",
-      "AECDH-RC4-SHA",
-      "AECDH-DES-CBC3-SHA",
-      "AECDH-AES128-SHA",
-      "AECDH-AES256-SHA",
-
-      // PSK ciphersuites from RFC 4279
-      "PSK-RC4-SHA",
-      "PSK-3DES-EDE-CBC-SHA",
       "PSK-AES128-CBC-SHA",
       "PSK-AES256-CBC-SHA",
-
-      // PSK ciphersuites from RFC 5489
-      "ECDHE-PSK-AES128-CBC-SHA",
-      "ECDHE-PSK-AES256-CBC-SHA",
-
-      // SRP ciphersuite from RFC 5054
-      "SRP-3DES-EDE-CBC-SHA",
-      "SRP-RSA-3DES-EDE-CBC-SHA",
-      "SRP-DSS-3DES-EDE-CBC-SHA",
-      "SRP-AES-128-CBC-SHA",
-      "SRP-RSA-AES-128-CBC-SHA",
-      "SRP-DSS-AES-128-CBC-SHA",
-      "SRP-AES-256-CBC-SHA",
-      "SRP-RSA-AES-256-CBC-SHA",
-      "SRP-DSS-AES-256-CBC-SHA",
-
-      // Camellia ciphersuites from RFC 4132
-      "CAMELLIA128-SHA",
-      "DH-DSS-CAMELLIA128-SHA",
-      "DH-RSA-CAMELLIA128-SHA",
-      "DHE-DSS-CAMELLIA128-SHA",
-      "DHE-RSA-CAMELLIA128-SHA",
-      "ADH-CAMELLIA128-SHA",
-
-      "CAMELLIA256-SHA",
-      "DH-DSS-CAMELLIA256-SHA",
-      "DH-RSA-CAMELLIA256-SHA",
-      "DHE-DSS-CAMELLIA256-SHA",
-      "DHE-RSA-CAMELLIA256-SHA",
-      "ADH-CAMELLIA256-SHA",
-
-      // SEED ciphersuites from RFC 4162
-      "SEED-SHA",
-      "DH-DSS-SEED-SHA",
-      "DH-RSA-SEED-SHA",
-      "DHE-DSS-SEED-SHA",
-      "DHE-RSA-SEED-SHA",
-      "ADH-SEED-SHA",
-
-      // TLS v1.2 ciphersuites
-      "NULL-SHA256",
-      "AES128-SHA256",
-      "AES256-SHA256",
-      "DH-DSS-AES128-SHA256",
-      "DH-RSA-AES128-SHA256",
-      "DHE-DSS-AES128-SHA256",
-      "DHE-RSA-AES128-SHA256",
-      "DH-DSS-AES256-SHA256",
-      "DH-RSA-AES256-SHA256",
-      "DHE-DSS-AES256-SHA256",
-      "DHE-RSA-AES256-SHA256",
-      "ADH-AES128-SHA256",
-      "ADH-AES256-SHA256",
-
-      // TLS v1.2 GCM ciphersuites from RFC 5288
       "AES128-GCM-SHA256",
       "AES256-GCM-SHA384",
-      "DHE-RSA-AES128-GCM-SHA256",
-      "DHE-RSA-AES256-GCM-SHA384",
-      "DH-RSA-AES128-GCM-SHA256",
-      "DH-RSA-AES256-GCM-SHA384",
-      "DHE-DSS-AES128-GCM-SHA256",
-      "DHE-DSS-AES256-GCM-SHA384",
-      "DH-DSS-AES128-GCM-SHA256",
-      "DH-DSS-AES256-GCM-SHA384",
-      "ADH-AES128-GCM-SHA256",
-      "ADH-AES256-GCM-SHA384",
-
-      // ECDH HMAC based ciphersuites from RFC 5289
-
+      "ECDHE-ECDSA-AES128-SHA",
+      "ECDHE-ECDSA-AES256-SHA",
+      "ECDHE-RSA-AES128-SHA",
+      "ECDHE-RSA-AES256-SHA",
       "ECDHE-ECDSA-AES128-SHA256",
-      "ECDHE-ECDSA-AES256-SHA384",
-      "ECDH-ECDSA-AES128-SHA256",
-      "ECDH-ECDSA-AES256-SHA384",
       "ECDHE-RSA-AES128-SHA256",
-      "ECDHE-RSA-AES256-SHA384",
-      "ECDH-RSA-AES128-SHA256",
-      "ECDH-RSA-AES256-SHA384",
-
-      // ECDH GCM based ciphersuites from RFC 5289
       "ECDHE-ECDSA-AES128-GCM-SHA256",
       "ECDHE-ECDSA-AES256-GCM-SHA384",
-      "ECDH-ECDSA-AES128-GCM-SHA256",
-      "ECDH-ECDSA-AES256-GCM-SHA384",
       "ECDHE-RSA-AES128-GCM-SHA256",
       "ECDHE-RSA-AES256-GCM-SHA384",
-      "ECDH-RSA-AES128-GCM-SHA256",
-      "ECDH-RSA-AES256-GCM-SHA384",
+      "ECDHE-PSK-AES128-CBC-SHA",
+      "ECDHE-PSK-AES256-CBC-SHA",
       "ECDHE-RSA-CHACHA20-POLY1305",
       "ECDHE-ECDSA-CHACHA20-POLY1305",
       "ECDHE-PSK-CHACHA20-POLY1305",
-
-      // TLS 1.3 ciphersuites from RFC 8446.
-      "TLS_AES_128_GCM_SHA256",
-      "TLS_AES_256_GCM_SHA384",
-      "TLS_CHACHA20_POLY1305_SHA256",
-
-      // Configurations include in the default cipher list
-      "HIGH",
-      "!aNULL",
-      "!eNULL",
-      "!EXPORT",
-      "!DES",
-      "!RC4",
-      "!MD5",
-      "!PSK",
-      "!SRP",
-      "!CAMELLIA",
     ]);
   }
   return _VALID_CIPHERS_SET;
@@ -260,44 +122,55 @@ function validateCiphers(ciphers: string, name: string = "options") {
 
     // TODO: right now we need this because we dont create the CTX before listening/connecting
     // we need to change that in the future and let BoringSSL do the validation
+    //
+    // Mirrors SSL_CTX_set_cipher_list: unrecognized individual names are
+    // ignored; the call only fails when the resulting TLS <= 1.2 cipher list
+    // is empty. TLS 1.3 suite names (TLS_*) configure the fixed TLS 1.3 list,
+    // which BoringSSL does not allow overriding, so they are skipped entirely
+    // (matching Node built against BoringSSL).
     const ciphersSet = getValidCiphersSet();
     const requested = ciphers.split(":");
+    let sawLegacyEntry = false;
+    let sawUsableEntry = false;
     for (const r of requested) {
-      if (r && !ciphersSet.has(r)) {
-        // OpenSSL cipher-list grammar: `!X`/`-X`/`+X` operators, `A+B`
-        // intersections, `@SECLEVEL=n`/`@STRENGTH` directives and selector
-        // keywords (HIGH, PSK, aNULL, ...) are not literal cipher names -
-        // leave their evaluation to BoringSSL. Only an unrecognized literal
-        // suite name is rejected here.
-        // BoringSSL has no security levels: its cipher parser rejects
-        // @SECLEVEL with INVALID_COMMAND. Report that the way the native
-        // parser would, with Node's decomposed error shape.
-        if (r.includes("@SECLEVEL")) {
-          const err = new Error("error:0f000076:SSL routines:OPENSSL_internal:INVALID_COMMAND") as Error & {
-            code: string;
-            library: string;
-            function: string;
-            reason: string;
-          };
-          err.code = "ERR_SSL_INVALID_COMMAND";
-          err.library = "SSL routines";
-          err.function = "OPENSSL_internal";
-          err.reason = "INVALID_COMMAND";
-          throw err;
-        }
-        const first = r.charCodeAt(0);
-        if (
-          first === 0x21 /* ! */ ||
-          first === 0x2d /* - */ ||
-          first === 0x2b /* + */ ||
-          first === 0x40 /* @ */ ||
-          r.includes("+") ||
-          CIPHER_LIST_SELECTORS.has(r)
-        ) {
-          continue;
-        }
-        throw $ERR_SSL_NO_CIPHER_MATCH();
+      if (!r) continue;
+      // BoringSSL has no security levels: its cipher parser rejects
+      // @SECLEVEL with INVALID_COMMAND. Report that the way the native
+      // parser would, with Node's decomposed error shape.
+      if (r.includes("@SECLEVEL")) {
+        const err = new Error("error:0f000076:SSL routines:OPENSSL_internal:INVALID_COMMAND") as Error & {
+          code: string;
+          library: string;
+          function: string;
+          reason: string;
+        };
+        err.code = "ERR_SSL_INVALID_COMMAND";
+        err.library = "SSL routines";
+        err.function = "OPENSSL_internal";
+        err.reason = "INVALID_COMMAND";
+        throw err;
       }
+      if (r.startsWith("TLS_")) continue;
+      sawLegacyEntry = true;
+      // OpenSSL cipher-list grammar: `!X`/`-X`/`+X` operators, `A+B`
+      // intersections, `@STRENGTH` directives and selector keywords
+      // (HIGH, PSK, aNULL, ...) are not literal cipher names — leave their
+      // evaluation to BoringSSL and assume they can contribute matches.
+      const first = r.charCodeAt(0);
+      if (
+        first === 0x21 /* ! */ ||
+        first === 0x2d /* - */ ||
+        first === 0x2b /* + */ ||
+        first === 0x40 /* @ */ ||
+        r.includes("+") ||
+        CIPHER_LIST_SELECTORS.has(r) ||
+        ciphersSet.has(r)
+      ) {
+        sawUsableEntry = true;
+      }
+    }
+    if (sawLegacyEntry && !sawUsableEntry) {
+      throw $ERR_SSL_NO_CIPHER_MATCH();
     }
   }
 }
