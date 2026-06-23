@@ -157,6 +157,14 @@ export default [
         fn: "getReader",
         length: 0,
       },
+      setWakeup: {
+        fn: "setWakeup",
+        length: 1,
+      },
+      pull: {
+        fn: "pull",
+        length: 1,
+      },
       initStreamingSource: {
         fn: "initStreamingSource",
         length: 0,

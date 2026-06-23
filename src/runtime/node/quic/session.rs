@@ -11,6 +11,7 @@
 use core::cell::Cell;
 use core::ffi::{c_int, c_void};
 use core::ptr::{null, null_mut};
+use std::collections::HashMap;
 
 use bun_boringssl_sys as ssl;
 use bun_jsc::{CallFrame, JSGlobalObject, JSValue, JsCell, JsRef, JsResult, Strong, StringJsc};
@@ -24,9 +25,25 @@ use crate::timer::{EventLoopTimer, EventLoopTimerState, EventLoopTimerTag};
 use super::callbacks;
 use super::endpoint::QuicEndpoint;
 use super::now_ns;
+use super::stream::QuicStream;
 use super::tls::{TlsConfig, TlsSession};
 
 bun_core::declare_scope!(quic_session, hidden);
+
+/// Stream activity recorded by the ngtcp2 callbacks during packet processing
+/// (which must not call into JS) and dispatched afterwards on the JS thread.
+enum StreamEvent {
+    /// The peer opened a new stream.
+    Opened(i64),
+    /// Stream data (possibly empty) and/or the FIN flag arrived.
+    Data { id: i64, bytes: Vec<u8>, fin: bool },
+    /// The stream closed (all data exchanged or an application error).
+    Closed { id: i64, code: u64, errored: bool },
+    /// The peer abruptly reset its sending side.
+    Reset { id: i64, code: u64 },
+    /// More stream-level flow-control credit became available.
+    Drain(i64),
+}
 
 /// Mirrors Node's `Session::State` (`SESSION_STATE` in node/src/quic/session.cc).
 /// `IDX_STATE_SESSION_*` binding constants are `offset_of!` values into this.
@@ -239,17 +256,91 @@ unsafe extern "C" fn get_new_connection_id_cb(
     0
 }
 
-/// No-op stream data sink for the handshake phase (stream support lands next).
-unsafe extern "C" fn recv_stream_data_cb(
+/// Push one stream event onto the owning session's queue. Never calls JS —
+/// these run inside ngtcp2 packet processing.
+fn push_stream_event(user_data: *mut c_void, event: StreamEvent) {
+    if user_data.is_null() {
+        return;
+    }
+    // SAFETY: `user_data` is the owning QuicSession (set at conn creation),
+    // alive for as long as the conn is.
+    let session = unsafe { &*user_data.cast::<QuicSession>() };
+    session.stream_events.with_mut(|events| events.push(event));
+}
+
+unsafe extern "C" fn stream_open_cb(
     _conn: *mut ngtcp2::ngtcp2_conn,
-    _flags: u32,
-    _stream_id: i64,
+    stream_id: i64,
+    user_data: *mut c_void,
+) -> c_int {
+    push_stream_event(user_data, StreamEvent::Opened(stream_id));
+    0
+}
+
+unsafe extern "C" fn recv_stream_data_cb(
+    conn: *mut ngtcp2::ngtcp2_conn,
+    flags: u32,
+    stream_id: i64,
     _offset: u64,
-    _data: *const u8,
-    _datalen: usize,
-    _user_data: *mut c_void,
+    data: *const u8,
+    datalen: usize,
+    user_data: *mut c_void,
     _stream_user_data: *mut c_void,
 ) -> c_int {
+    let bytes = if data.is_null() || datalen == 0 {
+        Vec::new()
+    } else {
+        // SAFETY: ngtcp2 hands us `datalen` readable bytes valid only for the
+        // duration of this callback; copy what we keep.
+        unsafe { core::slice::from_raw_parts(data, datalen) }.to_vec()
+    };
+    let fin = flags & ngtcp2::NGTCP2_STREAM_DATA_FLAG_FIN != 0;
+    push_stream_event(user_data, StreamEvent::Data { id: stream_id, bytes, fin });
+    // Connection-level flow control credit is returned immediately; the
+    // stream-level credit is granted as the JS reader consumes the data.
+    if datalen > 0 {
+        // SAFETY: `conn` is the live connection this callback fires for.
+        unsafe { ngtcp2::ngtcp2_conn_extend_max_offset(conn, datalen as u64) };
+    }
+    0
+}
+
+unsafe extern "C" fn stream_close_cb(
+    _conn: *mut ngtcp2::ngtcp2_conn,
+    flags: u32,
+    stream_id: i64,
+    app_error_code: u64,
+    user_data: *mut c_void,
+    _stream_user_data: *mut c_void,
+) -> c_int {
+    let errored = flags & ngtcp2::NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET != 0 && app_error_code != 0;
+    push_stream_event(
+        user_data,
+        StreamEvent::Closed { id: stream_id, code: app_error_code, errored },
+    );
+    0
+}
+
+unsafe extern "C" fn stream_reset_cb(
+    _conn: *mut ngtcp2::ngtcp2_conn,
+    stream_id: i64,
+    _final_size: u64,
+    app_error_code: u64,
+    user_data: *mut c_void,
+    _stream_user_data: *mut c_void,
+) -> c_int {
+    push_stream_event(user_data, StreamEvent::Reset { id: stream_id, code: app_error_code });
+    0
+}
+
+unsafe extern "C" fn extend_max_stream_data_cb(
+    _conn: *mut ngtcp2::ngtcp2_conn,
+    stream_id: i64,
+    _max_data: u64,
+    user_data: *mut c_void,
+    _stream_user_data: *mut c_void,
+) -> c_int {
+    push_stream_event(user_data, StreamEvent::Drain(stream_id));
     0
 }
 
@@ -272,7 +363,11 @@ fn build_callbacks(is_server: bool) -> ngtcp2::ngtcp2_callbacks {
     cb.version_negotiation = Some(ngtcp2::ngtcp2_crypto_version_negotiation_cb);
     cb.rand = Some(rand_cb);
     cb.get_new_connection_id = Some(get_new_connection_id_cb);
+    cb.stream_open = Some(stream_open_cb);
     cb.recv_stream_data = Some(recv_stream_data_cb);
+    cb.stream_close = Some(stream_close_cb);
+    cb.stream_reset = Some(stream_reset_cb);
+    cb.extend_max_stream_data = Some(extend_max_stream_data_cb);
     cb
 }
 
@@ -319,6 +414,11 @@ pub struct QuicSession {
     /// The CID(s) this session is registered under in the endpoint's routing
     /// map, so destroy can unregister them.
     registered_cids: JsCell<Vec<Vec<u8>>>,
+    /// Live streams by stream id.
+    streams: JsCell<HashMap<i64, *mut QuicStream>>,
+    /// Stream activity queued by the ngtcp2 callbacks, dispatched to JS after
+    /// the current packet/expiry processing finishes.
+    stream_events: JsCell<Vec<StreamEvent>>,
     /// The realm this session was created in (JS-thread only; outlives the
     /// session).
     global: Cell<*const JSGlobalObject>,
@@ -389,6 +489,8 @@ impl QuicSession {
             local_addr: Cell::new(local_addr),
             remote_addr: Cell::new(remote_addr),
             registered_cids: JsCell::new(Vec::new()),
+            streams: JsCell::new(HashMap::new()),
+            stream_events: JsCell::new(Vec::new()),
             global: Cell::new(core::ptr::from_ref(global)),
             event_loop_timer: JsCell::new(EventLoopTimer::init_paused(EventLoopTimerTag::QuicSession)),
             handshake_reported: Cell::new(false),
@@ -807,7 +909,165 @@ impl QuicSession {
             return;
         }
         self.maybe_report_handshake(global);
+        if self.destroyed.get() {
+            return;
+        }
+        self.process_stream_events(global);
         self.rearm_timer();
+    }
+
+    /// Dispatch the stream activity queued by the ngtcp2 callbacks during the
+    /// last packet/expiry processing pass. Runs on the JS thread with no
+    /// ngtcp2 frames on the stack, so callbacks may re-enter the session.
+    fn process_stream_events(&self, global: &JSGlobalObject) {
+        loop {
+            let events = self.stream_events.replace(Vec::new());
+            if events.is_empty() {
+                return;
+            }
+            // Streams whose readers should be woken once the batch is done:
+            // (stream id, fin seen).
+            let mut to_wake: Vec<(i64, bool)> = Vec::new();
+            for event in events {
+                if self.destroyed.get() {
+                    return;
+                }
+                match event {
+                    StreamEvent::Opened(id) => {
+                        if self.streams.get().contains_key(&id) {
+                            continue;
+                        }
+                        let session_ptr = core::ptr::from_ref(self).cast_mut();
+                        let Ok((stream, stream_handle)) =
+                            QuicStream::create(global, session_ptr, self.handle(), id)
+                        else {
+                            continue;
+                        };
+                        self.streams.with_mut(|map| {
+                            map.insert(id, stream);
+                        });
+                        // Peer-initiated stream direction is derived from the
+                        // id: bit 1 set means unidirectional.
+                        let direction = if id & 0x2 != 0 { 1.0 } else { 0.0 };
+                        if let Some(callback) = callbacks::get(global, "onStreamCreated") {
+                            let vm = global.bun_vm().as_mut();
+                            vm.event_loop_ref().run_callback(
+                                callback,
+                                global,
+                                self.handle(),
+                                &[stream_handle, JSValue::js_number(direction)],
+                            );
+                        }
+                    }
+                    StreamEvent::Data { id, bytes, fin } => {
+                        let Some(&stream) = self.streams.get().get(&id) else { continue };
+                        // SAFETY: streams unregister themselves before teardown.
+                        unsafe { (*stream).push_inbound(&bytes, fin) };
+                        if let Some(entry) = to_wake.iter_mut().find(|(wid, _)| *wid == id) {
+                            entry.1 |= fin;
+                        } else {
+                            to_wake.push((id, fin));
+                        }
+                    }
+                    StreamEvent::Closed { id, code, errored } => {
+                        let Some(&stream) = self.streams.get().get(&id) else { continue };
+                        // A clean close also ends the readable side.
+                        // SAFETY: as above.
+                        unsafe { (*stream).push_inbound(&[], true) };
+                        if let Some(entry) = to_wake.iter_mut().find(|(wid, _)| *wid == id) {
+                            entry.1 = true;
+                        } else {
+                            to_wake.push((id, true));
+                        }
+                        // The error is delivered in QuicError::ToV8Value form:
+                        // [type, code, reason, errorName].
+                        let error = if errored {
+                            JSValue::create_array_from_slice(
+                                global,
+                                &[
+                                    JSValue::js_number(1.0),
+                                    JSValue::from_uint64_no_truncate(global, code),
+                                ],
+                            )
+                            .unwrap_or(JSValue::UNDEFINED)
+                        } else {
+                            JSValue::UNDEFINED
+                        };
+                        // SAFETY: as above.
+                        let stream_handle = unsafe { (*stream).handle() };
+                        if let Some(callback) = callbacks::get(global, "onStreamClose") {
+                            let vm = global.bun_vm().as_mut();
+                            vm.event_loop_ref().run_callback(callback, global, stream_handle, &[error]);
+                        }
+                    }
+                    StreamEvent::Reset { id, code } => {
+                        let Some(&stream) = self.streams.get().get(&id) else { continue };
+                        // SAFETY: as above.
+                        unsafe { (*stream).mark_reset(code) };
+                        if let Some(entry) = to_wake.iter_mut().find(|(wid, _)| *wid == id) {
+                            entry.1 = true;
+                        } else {
+                            to_wake.push((id, true));
+                        }
+                        // The JS layer only registers for the reset event when
+                        // an `onreset` callback is installed (wantsReset).
+                        // SAFETY: as above.
+                        let wants_reset = unsafe { (*(*stream).state_mut()).wants_reset } != 0;
+                        if wants_reset {
+                            let error = JSValue::create_array_from_slice(
+                                global,
+                                &[
+                                    JSValue::js_number(1.0),
+                                    JSValue::from_uint64_no_truncate(global, code),
+                                ],
+                            )
+                            .unwrap_or(JSValue::UNDEFINED);
+                            // SAFETY: as above.
+                            let stream_handle = unsafe { (*stream).handle() };
+                            if let Some(callback) = callbacks::get(global, "onStreamReset") {
+                                let vm = global.bun_vm().as_mut();
+                                vm.event_loop_ref().run_callback(callback, global, stream_handle, &[error]);
+                            }
+                        }
+                    }
+                    StreamEvent::Drain(id) => {
+                        let Some(&stream) = self.streams.get().get(&id) else { continue };
+                        // SAFETY: as above.
+                        if unsafe { (*stream).refresh_write_capacity() } {
+                            // SAFETY: as above.
+                            let stream_handle = unsafe { (*stream).handle() };
+                            if let Some(callback) = callbacks::get(global, "onStreamDrain") {
+                                let vm = global.bun_vm().as_mut();
+                                vm.event_loop_ref().run_callback(callback, global, stream_handle, &[]);
+                            }
+                        }
+                    }
+                }
+            }
+            for (id, fin) in to_wake {
+                if self.destroyed.get() {
+                    return;
+                }
+                let Some(&stream) = self.streams.get().get(&id) else { continue };
+                // SAFETY: as above.
+                if unsafe { (*stream).is_destroyed() } {
+                    continue;
+                }
+                // SAFETY: as above.
+                if let Some(wakeup) = unsafe { (*stream).take_wakeup() } {
+                    let vm = global.bun_vm().as_mut();
+                    vm.event_loop_ref().run_callback(
+                        wakeup.get(),
+                        global,
+                        JSValue::UNDEFINED,
+                        &[JSValue::js_boolean(fin)],
+                    );
+                }
+            }
+            // The JS callbacks above may have produced more events (e.g. a
+            // reader pulling data triggers flow-control updates); loop until
+            // the queue stays empty.
+        }
     }
 
     /// Run the ngtcp2 write loop, sending every produced packet.
@@ -823,14 +1083,51 @@ impl QuicSession {
         // The address copies must outlive every writev call in the loop: the
         // path only borrows pointers into them.
         let (path_local, path_remote) = (self.local_addr.get(), self.remote_addr.get());
+
+        // Streams with queued outbound data, visited round-robin; a stream
+        // that ngtcp2 reports as blocked is skipped for the rest of this pass.
+        let mut pending_streams: Vec<*mut QuicStream> = self
+            .streams
+            .get()
+            .values()
+            .copied()
+            .filter(|&s| {
+                // SAFETY: streams unregister themselves before teardown.
+                unsafe { !(*s).is_destroyed() && (*s).has_pending_outbound() }
+            })
+            .collect();
+
         loop {
+            // Pick the stream (and chunk) to include in this packet, if any.
+            let (stream_id, chunk, fin, stream_ptr): (i64, Vec<u8>, bool, *mut QuicStream) =
+                match pending_streams.last().copied() {
+                    Some(stream) => {
+                        // SAFETY: as above.
+                        let (chunk, fin) = unsafe {
+                            (*stream).outbound.with_mut(|outbound| {
+                                let take = outbound.data.len().min(MAX_SEND_PACKET);
+                                let chunk: Vec<u8> = outbound.data.iter().copied().take(take).collect();
+                                (chunk, outbound.fin_pending && take == outbound.data.len())
+                            })
+                        };
+                        // SAFETY: as above.
+                        let id = unsafe { (*(*stream).state_mut()).id };
+                        (id, chunk, fin, stream)
+                    }
+                    None => (-1, Vec::new(), false, null_mut()),
+                };
+
             let mut path = ngtcp2::ngtcp2_path {
                 local: path_local.ngtcp2_addr(),
                 remote: path_remote.ngtcp2_addr(),
                 user_data: null_mut(),
             };
             let mut pi = ngtcp2::ngtcp2_pkt_info::default();
-            // SAFETY: `conn` is live; out-buffers are stack locals.
+            let mut pdatalen: ngtcp2::ngtcp2_ssize = 0;
+            let datav = ngtcp2::ngtcp2_vec { base: chunk.as_ptr(), len: chunk.len() };
+            let flags = if fin { ngtcp2::NGTCP2_WRITE_STREAM_FLAG_FIN } else { ngtcp2::NGTCP2_WRITE_STREAM_FLAG_NONE };
+            // SAFETY: `conn` is live; out-buffers and the data vector are
+            // stack locals valid across the call.
             let n = unsafe {
                 ngtcp2::ngtcp2_conn_writev_stream_versioned(
                     self.conn.get(),
@@ -839,26 +1136,63 @@ impl QuicSession {
                     &mut pi,
                     buf.as_mut_ptr(),
                     buf.len(),
-                    null_mut(),
-                    ngtcp2::NGTCP2_WRITE_STREAM_FLAG_NONE,
-                    -1,
-                    null(),
-                    0,
+                    &mut pdatalen,
+                    flags,
+                    stream_id,
+                    if chunk.is_empty() { null() } else { &datav },
+                    if chunk.is_empty() { 0 } else { 1 },
                     now_ns(),
                 )
             };
             if n < 0 {
                 let rv = n as c_int;
-                if rv == ngtcp2::NGTCP2_ERR_DRAINING {
-                    return;
+                match rv {
+                    ngtcp2::NGTCP2_ERR_DRAINING => return,
+                    ngtcp2::NGTCP2_ERR_STREAM_DATA_BLOCKED
+                    | ngtcp2::NGTCP2_ERR_STREAM_SHUT_WR
+                    | ngtcp2::NGTCP2_ERR_STREAM_NOT_FOUND => {
+                        // This stream cannot make progress right now; move on.
+                        pending_streams.pop();
+                        continue;
+                    }
+                    _ => {
+                        // SAFETY: plain status query.
+                        if unsafe { ngtcp2::ngtcp2_err_is_fatal(rv) } != 0 {
+                            self.close_with_local_error(global, rv);
+                        }
+                        return;
+                    }
                 }
-                // SAFETY: plain status query.
-                if unsafe { ngtcp2::ngtcp2_err_is_fatal(rv) } != 0 {
-                    self.close_with_local_error(global, rv);
-                }
-                return;
             }
+
+            // Account for the stream bytes (and FIN) ngtcp2 accepted into this
+            // packet. pdatalen is -1 when no stream frame was included.
+            if !stream_ptr.is_null() && n > 0 {
+                if pdatalen > 0 {
+                    let consumed = pdatalen as usize;
+                    // SAFETY: as above.
+                    unsafe {
+                        (*stream_ptr).outbound.with_mut(|outbound| {
+                            let len = outbound.data.len();
+                            outbound.data.drain(..consumed.min(len));
+                        });
+                    }
+                }
+                // SAFETY: as above.
+                let drained = unsafe { (*stream_ptr).outbound.get().data.is_empty() };
+                if fin && pdatalen >= 0 && drained {
+                    // SAFETY: as above.
+                    unsafe { (*stream_ptr).mark_fin_sent() };
+                }
+                // SAFETY: as above.
+                if unsafe { !(*stream_ptr).has_pending_outbound() } {
+                    pending_streams.pop();
+                }
+            }
+
             if n == 0 {
+                // ngtcp2 has nothing more to send right now (flow control,
+                // congestion, or simply done) — stop this pass.
                 break;
             }
             let remote = self.remote_addr.get();
@@ -944,6 +1278,10 @@ impl QuicSession {
             return;
         }
         this_ref.flush(global);
+        if this_ref.destroyed.get() {
+            return;
+        }
+        this_ref.process_stream_events(global);
         this_ref.rearm_timer();
     }
 
@@ -1145,6 +1483,16 @@ impl QuicSession {
         if self.event_loop_timer.get().state == EventLoopTimerState::ACTIVE {
             timer_all().remove(self.event_loop_timer.as_ptr());
         }
+        // Detach every live stream first so nothing keeps pointers into the
+        // connection that is about to be freed.
+        let live_streams: Vec<*mut QuicStream> = self.streams.get().values().copied().collect();
+        for stream in live_streams {
+            // SAFETY: pointers in the map are live (streams unregister
+            // themselves on teardown, which is idempotent).
+            unsafe { (*stream).teardown() };
+        }
+        self.streams.with_mut(HashMap::clear);
+        self.stream_events.with_mut(Vec::clear);
         let endpoint = self.endpoint.get();
         if !endpoint.is_null() {
             self.registered_cids.with_mut(|cids| {
@@ -1262,8 +1610,122 @@ impl QuicSession {
         Err(global.throw(format_args!("QuicSession.updateKey is not implemented yet")))
     }
 
-    pub(crate) fn open_stream(&self, global: &JSGlobalObject, _frame: &CallFrame) -> JsResult<JSValue> {
-        Err(global.throw(format_args!("QuicSession.openStream is not implemented yet")))
+    /// `openStream(direction, body)` — open a locally-initiated stream.
+    /// Returns the stream handle, or undefined when no stream credit is
+    /// available (the JS layer reports ERR_QUIC_OPEN_STREAM_FAILED).
+    pub(crate) fn open_stream(&self, global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
+        if self.destroyed.get() || self.conn.get().is_null() {
+            return Ok(JSValue::UNDEFINED);
+        }
+        let [direction, body] = frame.arguments_as_array::<2>();
+        let unidirectional = direction.is_number() && direction.as_number() == 1.0;
+
+        let mut stream_id: i64 = -1;
+        // SAFETY: `conn` is live; `stream_id` is a stack out-param.
+        let rv = unsafe {
+            if unidirectional {
+                ngtcp2::ngtcp2_conn_open_uni_stream(self.conn.get(), &mut stream_id, null_mut())
+            } else {
+                ngtcp2::ngtcp2_conn_open_bidi_stream(self.conn.get(), &mut stream_id, null_mut())
+            }
+        };
+        if rv != 0 {
+            // Includes NGTCP2_ERR_STREAM_ID_BLOCKED (no stream credit yet).
+            return Ok(JSValue::UNDEFINED);
+        }
+
+        let session_ptr = core::ptr::from_ref(self).cast_mut();
+        let (stream, handle) = QuicStream::create(global, session_ptr, frame.this(), stream_id)?;
+        self.streams.with_mut(|map| {
+            map.insert(stream_id, stream);
+        });
+
+        if !body.is_empty_or_undefined_or_null() {
+            if let Some(buf) = body.as_array_buffer(global) {
+                let bytes = buf.byte_slice();
+                // SAFETY: the stream was created above and is registered.
+                unsafe {
+                    (*stream).outbound.with_mut(|outbound| {
+                        outbound.started = true;
+                        outbound.data.extend(bytes.iter().copied());
+                        outbound.fin_pending = true;
+                    });
+                    (*(*stream).state_mut()).has_outbound = 1;
+                }
+            }
+            // Blob / FileHandle / streaming sources are configured by the JS
+            // layer through attachSource()/initStreamingSource() afterwards.
+        }
+
+        self.flush(global);
+        self.rearm_timer();
+        Ok(handle)
+    }
+
+    /// Detach a stream from the routing map (called from the stream's
+    /// teardown).
+    pub(super) fn unregister_stream(&self, id: i64) {
+        self.streams.with_mut(|map| {
+            map.remove(&id);
+        });
+    }
+
+    /// Grant stream-level flow-control credit back to the peer as the JS
+    /// reader consumes data.
+    pub(super) fn extend_stream_offset(&self, id: i64, consumed: u64) {
+        if self.destroyed.get() || self.conn.get().is_null() || consumed == 0 {
+            return;
+        }
+        // SAFETY: `conn` is live.
+        unsafe {
+            ngtcp2::ngtcp2_conn_extend_max_stream_offset(self.conn.get(), id, consumed);
+        }
+    }
+
+    /// Abruptly terminate both sides of a stream (stream.destroy(code)).
+    pub(super) fn shutdown_stream(&self, global: &JSGlobalObject, id: i64, code: u64) {
+        if self.destroyed.get() || self.conn.get().is_null() {
+            return;
+        }
+        // SAFETY: `conn` is live.
+        unsafe {
+            ngtcp2::ngtcp2_conn_shutdown_stream_write(self.conn.get(), 0, id, code);
+            ngtcp2::ngtcp2_conn_shutdown_stream_read(self.conn.get(), 0, id, code);
+        }
+        self.flush(global);
+        self.rearm_timer();
+    }
+
+    /// Ask the peer to stop sending on a stream (STOP_SENDING).
+    pub(super) fn stop_sending(&self, global: &JSGlobalObject, id: i64, code: u64) {
+        if self.destroyed.get() || self.conn.get().is_null() {
+            return;
+        }
+        // SAFETY: `conn` is live.
+        unsafe {
+            ngtcp2::ngtcp2_conn_shutdown_stream_read(self.conn.get(), 0, id, code);
+        }
+        self.flush(global);
+        self.rearm_timer();
+    }
+
+    /// Abruptly end the local sending side of a stream (RESET_STREAM).
+    pub(super) fn reset_stream_write(&self, global: &JSGlobalObject, id: i64, code: u64) {
+        if self.destroyed.get() || self.conn.get().is_null() {
+            return;
+        }
+        // SAFETY: `conn` is live.
+        unsafe {
+            ngtcp2::ngtcp2_conn_shutdown_stream_write(self.conn.get(), 0, id, code);
+        }
+        self.flush(global);
+        self.rearm_timer();
+    }
+
+    /// `rearm_timer` for callers outside this module (streams kicking the
+    /// session after queueing data).
+    pub(super) fn rearm_timer_pub(&self) {
+        self.rearm_timer();
     }
 
     pub(crate) fn send_datagram(&self, global: &JSGlobalObject, _frame: &CallFrame) -> JsResult<JSValue> {

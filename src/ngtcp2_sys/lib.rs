@@ -79,7 +79,11 @@ pub const NGTCP2_SETTINGS_VERSION: c_int = 3;
 pub const NGTCP2_CALLBACKS_VERSION: c_int = 3;
 
 // Library error codes (subset used by the binding).
+pub const NGTCP2_ERR_STREAM_ID_BLOCKED: c_int = -206;
+pub const NGTCP2_ERR_STREAM_DATA_BLOCKED: c_int = -208;
 pub const NGTCP2_ERR_CRYPTO: c_int = -213;
+pub const NGTCP2_ERR_STREAM_SHUT_WR: c_int = -219;
+pub const NGTCP2_ERR_STREAM_NOT_FOUND: c_int = -220;
 pub const NGTCP2_ERR_DRAINING: c_int = -224;
 pub const NGTCP2_ERR_WRITE_MORE: c_int = -230;
 pub const NGTCP2_ERR_RETRY: c_int = -231;
@@ -90,6 +94,9 @@ pub const NGTCP2_ERR_IDLE_CLOSE: c_int = -238;
 pub const NGTCP2_WRITE_STREAM_FLAG_NONE: u32 = 0;
 pub const NGTCP2_WRITE_STREAM_FLAG_MORE: u32 = 0x01;
 pub const NGTCP2_WRITE_STREAM_FLAG_FIN: u32 = 0x02;
+
+pub const NGTCP2_STREAM_DATA_FLAG_FIN: u32 = 0x01;
+pub const NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET: u32 = 0x01;
 
 // ── Opaque handles ─────────────────────────────────────────────────────────
 
@@ -782,6 +789,34 @@ unsafe extern "C" {
 
     pub fn ngtcp2_conn_get_ccerr(conn: *mut ngtcp2_conn) -> *const ngtcp2_ccerr;
     pub fn ngtcp2_conn_get_expiry(conn: *mut ngtcp2_conn) -> ngtcp2_tstamp;
+    pub fn ngtcp2_conn_open_bidi_stream(
+        conn: *mut ngtcp2_conn,
+        pstream_id: *mut i64,
+        stream_user_data: *mut c_void,
+    ) -> c_int;
+    pub fn ngtcp2_conn_open_uni_stream(
+        conn: *mut ngtcp2_conn,
+        pstream_id: *mut i64,
+        stream_user_data: *mut c_void,
+    ) -> c_int;
+    pub fn ngtcp2_conn_extend_max_stream_offset(
+        conn: *mut ngtcp2_conn,
+        stream_id: i64,
+        datalen: u64,
+    ) -> c_int;
+    pub fn ngtcp2_conn_extend_max_offset(conn: *mut ngtcp2_conn, datalen: u64);
+    pub fn ngtcp2_conn_shutdown_stream_read(
+        conn: *mut ngtcp2_conn,
+        flags: u32,
+        stream_id: i64,
+        app_error_code: u64,
+    ) -> c_int;
+    pub fn ngtcp2_conn_shutdown_stream_write(
+        conn: *mut ngtcp2_conn,
+        flags: u32,
+        stream_id: i64,
+        app_error_code: u64,
+    ) -> c_int;
     pub fn ngtcp2_conn_handle_expiry(conn: *mut ngtcp2_conn, ts: ngtcp2_tstamp) -> c_int;
     pub fn ngtcp2_conn_get_handshake_completed(conn: *mut ngtcp2_conn) -> c_int;
     pub fn ngtcp2_conn_get_negotiated_version(conn: *mut ngtcp2_conn) -> u32;
