@@ -43,6 +43,8 @@ enum StreamEvent {
     Reset { id: i64, code: u64 },
     /// More stream-level flow-control credit became available.
     Drain(i64),
+    /// The stream is blocked on stream-level flow control.
+    Blocked(i64),
 }
 
 /// Mirrors Node's `Session::State` (`SESSION_STATE` in node/src/quic/session.cc).
@@ -977,7 +979,7 @@ impl QuicSession {
     /// Dispatch the stream activity queued by the ngtcp2 callbacks during the
     /// last packet/expiry processing pass. Runs on the JS thread with no
     /// ngtcp2 frames on the stack, so callbacks may re-enter the session.
-    fn process_stream_events(&self, global: &JSGlobalObject) {
+    pub(super) fn process_stream_events(&self, global: &JSGlobalObject) {
         loop {
             let events = self.stream_events.replace(Vec::new());
             if events.is_empty() {
@@ -1104,6 +1106,21 @@ impl QuicSession {
                             }
                         }
                     }
+                    StreamEvent::Blocked(id) => {
+                        let Some(&stream) = self.streams.get().get(&id) else { continue };
+                        // The JS layer only registers for this when an
+                        // `onblocked` callback is installed (wantsBlock).
+                        // SAFETY: as above.
+                        let wants_block = unsafe { (*(*stream).state_mut()).wants_block } != 0;
+                        if wants_block {
+                            // SAFETY: as above.
+                            let stream_handle = unsafe { (*stream).handle() };
+                            if let Some(callback) = callbacks::get(global, "onStreamBlocked") {
+                                let vm = global.bun_vm().as_mut();
+                                vm.event_loop_ref().run_callback(callback, global, stream_handle, &[]);
+                            }
+                        }
+                    }
                 }
             }
             for (id, fin) in to_wake {
@@ -1214,6 +1231,13 @@ impl QuicSession {
             if !stream_ptr.is_null() && chunk_len > 0 {
                 // SAFETY: as above.
                 unsafe { (*stream_ptr).commit_staged(if n >= 0 { accepted } else { 0 }) };
+                if accepted > 0 && n >= 0 {
+                    // Consuming queued bytes may reopen the writer's window;
+                    // the Drain handler refreshes it and notifies JS.
+                    // SAFETY: as above.
+                    let id = unsafe { (*(*stream_ptr).state_mut()).id };
+                    self.stream_events.with_mut(|events| events.push(StreamEvent::Drain(id)));
+                }
             }
 
             if n < 0 {
@@ -1223,6 +1247,11 @@ impl QuicSession {
                     ngtcp2::NGTCP2_ERR_STREAM_DATA_BLOCKED
                     | ngtcp2::NGTCP2_ERR_STREAM_SHUT_WR
                     | ngtcp2::NGTCP2_ERR_STREAM_NOT_FOUND => {
+                        if rv == ngtcp2::NGTCP2_ERR_STREAM_DATA_BLOCKED && !stream_ptr.is_null() {
+                            // SAFETY: as above.
+                            let id = unsafe { (*(*stream_ptr).state_mut()).id };
+                            self.stream_events.with_mut(|events| events.push(StreamEvent::Blocked(id)));
+                        }
                         // This stream cannot make progress right now; move on.
                         pending_streams.pop();
                         continue;
@@ -1722,6 +1751,7 @@ impl QuicSession {
         }
 
         self.flush(global);
+        self.schedule_event_dispatch();
         self.rearm_timer();
         Ok(handle)
     }
@@ -1757,6 +1787,7 @@ impl QuicSession {
             ngtcp2::ngtcp2_conn_shutdown_stream_read(self.conn.get(), 0, id, code);
         }
         self.flush(global);
+        self.schedule_event_dispatch();
         self.rearm_timer();
     }
 
@@ -1770,6 +1801,7 @@ impl QuicSession {
             ngtcp2::ngtcp2_conn_shutdown_stream_read(self.conn.get(), 0, id, code);
         }
         self.flush(global);
+        self.schedule_event_dispatch();
         self.rearm_timer();
     }
 
@@ -1783,6 +1815,7 @@ impl QuicSession {
             ngtcp2::ngtcp2_conn_shutdown_stream_write(self.conn.get(), 0, id, code);
         }
         self.flush(global);
+        self.schedule_event_dispatch();
         self.rearm_timer();
     }
 
@@ -1790,6 +1823,19 @@ impl QuicSession {
     /// session after queueing data).
     pub(super) fn rearm_timer_pub(&self) {
         self.rearm_timer();
+    }
+
+    /// Stream events produced while servicing a JS-initiated call (write,
+    /// open, shutdown) are not dispatched underneath the caller; deliver them
+    /// on the next event-loop turn instead, like Node's deferred callbacks.
+    pub(super) fn schedule_event_dispatch(&self) {
+        if self.destroyed.get() || self.stream_events.get().is_empty() {
+            return;
+        }
+        let next = bun_core::Timespec::ms_from_now(bun_core::TimespecMockMode::ForceRealTime, 1);
+        // SAFETY: `event_loop_timer` is the live inline timer field of this
+        // heap-allocated session.
+        timer_all().update(self.event_loop_timer.as_ptr(), &next);
     }
 
     pub(crate) fn send_datagram(&self, global: &JSGlobalObject, _frame: &CallFrame) -> JsResult<JSValue> {

@@ -496,6 +496,7 @@ impl QuicStream {
         // session wrapper strong while attached).
         unsafe {
             (*session).flush(global);
+            (*session).schedule_event_dispatch();
             (*session).rearm_timer_pub();
         }
     }
