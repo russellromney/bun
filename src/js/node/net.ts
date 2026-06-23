@@ -529,6 +529,22 @@ function SocketEmitEndNT(self, _err?) {
     // reading the socket — accepted sockets are no longer force-resumed into
     // flowing mode.
     self.read(0);
+    // An allowHalfOpen=false socket tears down once 'end' fires, but bytes
+    // nobody is consuming keep 'end' from ever firing — and unlike Node, whose
+    // idle handles do not hold the event loop, an open native socket keeps the
+    // process alive. Nothing will ever read those bytes; finish the FIN-driven
+    // teardown now (which is also what the previous always-flowing accept path
+    // did, after discarding the data).
+    if (
+      !self.allowHalfOpen &&
+      !self.destroyed &&
+      self.readableLength > 0 &&
+      self.readableFlowing !== true &&
+      self.listenerCount("data") === 0 &&
+      self.listenerCount("readable") === 0
+    ) {
+      self.destroySoon();
+    }
   } else if (_err && !self.destroyed) {
     // An error excluded from the synthesis above (teardown noise, or no
     // listener attached): nothing more is coming, but the socket still has to
