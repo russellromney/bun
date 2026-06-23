@@ -382,7 +382,8 @@ export function readableByteStreamControllerRespondWithNewView(controller, view)
 
   if (firstDescriptor!.byteLength < view.byteLength) throw $ERR_INVALID_ARG_VALUE("view", view);
 
-  if (firstDescriptor!.buffer.byteLength !== view.buffer.byteLength) throw $ERR_INVALID_ARG_VALUE_RangeError("view", view);
+  if (firstDescriptor!.buffer.byteLength !== view.buffer.byteLength)
+    throw $ERR_INVALID_ARG_VALUE_RangeError("view", view);
 
   firstDescriptor!.buffer = view.buffer;
   $readableByteStreamControllerRespondInternal(controller, view.byteLength);
