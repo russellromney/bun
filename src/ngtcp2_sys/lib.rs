@@ -806,6 +806,7 @@ unsafe extern "C" {
     ) -> ngtcp2_ssize;
 
     pub fn ngtcp2_conn_get_ccerr(conn: *mut ngtcp2_conn) -> *const ngtcp2_ccerr;
+    pub fn ngtcp2_conn_set_keep_alive_timeout(conn: *mut ngtcp2_conn, timeout: ngtcp2_duration);
     pub fn ngtcp2_conn_get_expiry(conn: *mut ngtcp2_conn) -> ngtcp2_tstamp;
     pub fn ngtcp2_conn_open_bidi_stream(
         conn: *mut ngtcp2_conn,

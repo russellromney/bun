@@ -627,6 +627,9 @@ pub struct QuicSession {
     next_datagram_id: Cell<u64>,
     /// `datagramDropPolicy: 'drop-newest'` (default is drop-oldest).
     datagram_drop_newest: Cell<bool>,
+    /// Close options captured from a JS-initiated close, applied when the
+    /// deferred close completes: (application?, code, reason).
+    pending_close_error: JsCell<Option<(bool, u64, Vec<u8>)>>,
     /// The realm this session was created in (JS-thread only; outlives the
     /// session).
     global: Cell<*const JSGlobalObject>,
@@ -702,6 +705,7 @@ impl QuicSession {
             datagram_queue: JsCell::new(std::collections::VecDeque::new()),
             next_datagram_id: Cell::new(1),
             datagram_drop_newest: Cell::new(false),
+            pending_close_error: JsCell::new(None),
             global: Cell::new(core::ptr::from_ref(global)),
             event_loop_timer: JsCell::new(EventLoopTimer::init_paused(EventLoopTimerTag::QuicSession)),
             handshake_reported: Cell::new(false),
@@ -932,6 +936,7 @@ impl QuicSession {
         this.conn.set(conn);
         this.tls.set(Some(tls));
         this.conn_ref.set(Some(conn_ref));
+        this.apply_keep_alive(global, options)?;
 
         // Incoming packets from the server carry our SCID as their DCID.
         // SAFETY: endpoint pointer is valid (kept alive by endpoint_js Strong).
@@ -1043,6 +1048,7 @@ impl QuicSession {
         this.conn.set(conn);
         this.tls.set(Some(tls));
         this.conn_ref.set(Some(conn_ref));
+        this.apply_keep_alive(global, options)?;
 
         // Route both the client-chosen DCID (used until the client learns our
         // SCID) and our SCID to this session.
@@ -1575,16 +1581,31 @@ impl QuicSession {
         if this_ref.pending_close.replace(false) {
             // SAFETY: state buffer is live while the wrapper is.
             let silent = unsafe { (*this_ref.state_mut()).silent_close } != 0;
+            let close_error = this_ref.pending_close_error.replace(None);
+            // The reason bytes must outlive the CONNECTION_CLOSE write below.
+            let (application, code, reason) = close_error.unwrap_or((false, 0, Vec::new()));
             if !silent {
                 let mut ccerr = core::mem::MaybeUninit::<ngtcp2::ngtcp2_ccerr>::zeroed();
-                // SAFETY: ccerr_default fully initializes the struct (NO_ERROR).
-                let ccerr = unsafe {
+                // SAFETY: ccerr_default fully initializes the struct.
+                let mut ccerr = unsafe {
                     ngtcp2::ngtcp2_ccerr_default(ccerr.as_mut_ptr());
                     ccerr.assume_init()
                 };
+                if application || code != 0 || !reason.is_empty() {
+                    ccerr.type_ = if application {
+                        ngtcp2::NGTCP2_CCERR_TYPE_APPLICATION
+                    } else {
+                        ngtcp2::NGTCP2_CCERR_TYPE_TRANSPORT
+                    };
+                    ccerr.error_code = code;
+                    ccerr.reason = reason.as_ptr();
+                    ccerr.reasonlen = reason.len();
+                }
                 this_ref.send_connection_close(&ccerr);
             }
-            this_ref.report_close(global, 0, 0, None, None);
+            let error_type = if application { 1 } else { 0 };
+            let reason = if reason.is_empty() { None } else { Some(reason) };
+            this_ref.report_close(global, error_type, code, reason, None);
             return;
         }
 
@@ -1921,13 +1942,32 @@ impl QuicSession {
         timer_all().update(self.event_loop_timer.as_ptr(), &next);
     }
 
-    pub(crate) fn graceful_close(&self, _global: &JSGlobalObject, _frame: &CallFrame) -> JsResult<JSValue> {
+    pub(crate) fn graceful_close(&self, global: &JSGlobalObject, frame: &CallFrame) -> JsResult<JSValue> {
         if self.destroyed.get() {
             return Ok(JSValue::UNDEFINED);
         }
         // SAFETY: state buffer is live while the wrapper is.
         unsafe { (*self.state_mut()).graceful_close = 1 };
-        // No streams exist yet, so nothing further to wait for.
+        // Capture the close error options ({code, type, reason}) so the
+        // CONNECTION_CLOSE carries them when the close completes.
+        let options = frame.arguments_as_array::<1>()[0];
+        if options.is_object() {
+            let code = options
+                .get(global, "code")?
+                .filter(|v| v.is_number() || v.is_big_int())
+                .map_or(0, |v| if v.is_number() { v.as_number().max(0.0) as u64 } else { v.to_uint64_no_truncate() });
+            let application = match options.get(global, "type")?.filter(|v| v.is_string()) {
+                Some(value) => bun_core::String::from_js(value, global)?.to_utf8_bytes() == b"application",
+                None => false,
+            };
+            let reason = match options.get(global, "reason")?.filter(|v| v.is_string()) {
+                Some(value) => bun_core::String::from_js(value, global)?.to_utf8_bytes(),
+                None => Vec::new(),
+            };
+            if code != 0 || application || !reason.is_empty() {
+                self.pending_close_error.set(Some((application, code, reason)));
+            }
+        }
         self.schedule_close();
         Ok(JSValue::UNDEFINED)
     }
@@ -2166,6 +2206,27 @@ impl QuicSession {
         if let Some(policy) = options.get(global, "datagramDropPolicy")?.filter(|v| v.is_string()) {
             let policy = bun_core::String::from_js(policy, global)?.to_utf8_bytes();
             self.datagram_drop_newest.set(policy.as_slice() == b"drop-newest");
+        }
+        Ok(())
+    }
+
+    /// Apply the `keepAlive` option (PING interval in milliseconds) to the
+    /// connection.
+    fn apply_keep_alive(&self, global: &JSGlobalObject, options: JSValue) -> JsResult<()> {
+        if !options.is_object() || self.conn.get().is_null() {
+            return Ok(());
+        }
+        if let Some(value) = options.get(global, "keepAlive")?.filter(|v| v.is_number()) {
+            let ms = value.as_number();
+            if ms.is_finite() && ms > 0.0 {
+                // SAFETY: `conn` is live.
+                unsafe {
+                    ngtcp2::ngtcp2_conn_set_keep_alive_timeout(
+                        self.conn.get(),
+                        (ms as u64) * ngtcp2::NGTCP2_MILLISECONDS,
+                    );
+                }
+            }
         }
         Ok(())
     }
