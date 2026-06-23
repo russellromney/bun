@@ -624,7 +624,7 @@ pub unsafe fn loop_event_loop_utilization(loop_: *mut Loop) -> EventLoopUtilizat
     let mut idle_ns: u64 = 0;
     let mut active_ns: u64 = 0;
     // SAFETY: caller guarantees `loop_` is live for the duration of the call.
-    unsafe { c::us_loop_event_loop_utilization(loop_, &mut idle_ns, &mut active_ns) };
+    unsafe { c::us_loop_event_loop_utilization(loop_, &raw mut idle_ns, &raw mut active_ns) };
     EventLoopUtilization {
         idle_ms: idle_ns as f64 / 1_000_000.0,
         active_ms: active_ns as f64 / 1_000_000.0,
