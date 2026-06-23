@@ -825,26 +825,16 @@ const ServerHandlers: SocketHandler<NetSocket> = {
     if (pauseOnConnect) {
       self.pause();
     }
-    // A throw from a 'secureConnection'/'secure'/'secureConnect' listener must
-    // crash the process like Node (the native dispatcher would otherwise route
-    // it into the socket error handler and silently swallow the exception).
-    try {
-      if (server) {
-        const connectionListener = server[bunSocketServerOptions]?.connectionListener;
-        if (typeof connectionListener === "function") {
-          server.prependOnceListener("secureConnection", connectionListener);
-        }
-        server.emit("secureConnection", self);
+    if (server) {
+      const connectionListener = server[bunSocketServerOptions]?.connectionListener;
+      if (typeof connectionListener === "function") {
+        server.prependOnceListener("secureConnection", connectionListener);
       }
-      // after secureConnection event we emmit secure and secureConnect
-      self.emit("secure", self);
-      self.emit("secureConnect", verifyError);
-    } catch (err) {
-      process.nextTick(() => {
-        throw err;
-      });
-      return;
+      server.emit("secureConnection", self);
     }
+    // after secureConnection event we emmit secure and secureConnect
+    self.emit("secure", self);
+    self.emit("secureConnect", verifyError);
     if (!pauseOnConnect) {
       self.resume();
     }
