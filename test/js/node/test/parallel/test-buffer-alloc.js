@@ -1092,11 +1092,13 @@ assert.throws(
 
 assert.throws(() => Buffer.from(), {
   name: 'TypeError',
-  message: 'The first argument must be of type string, Buffer, ArrayBuffer, Array, or Array-like Object. Received undefined'
+  message: 'The first argument must be of type string or an instance of ' +
+  'Buffer, ArrayBuffer, or Array or an Array-like Object. Received undefined'
 });
 assert.throws(() => Buffer.from(null), {
   name: 'TypeError',
-  message: 'The first argument must be of type string, Buffer, ArrayBuffer, Array, or Array-like Object. Received null'
+  message: 'The first argument must be of type string or an instance of ' +
+  'Buffer, ArrayBuffer, or Array or an Array-like Object. Received null'
 });
 
 // Test prototype getters don't throw

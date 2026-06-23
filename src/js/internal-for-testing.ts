@@ -220,6 +220,24 @@ export const exposedInternals = {
   "internal/streams/add-abort-signal": require("internal/streams/add-abort-signal"),
   "internal/async_context_frame": require("internal/async_context_frame"),
   "internal/async_hooks": require("internal/async_hooks"),
+  "internal/dgram": require("internal/dgram"),
+  // Node tests reach internalBinding() through internal/test/binding; serve the
+  // small constant surface they consume (libuv error codes).
+  "internal/test/binding": {
+    internalBinding(name: string) {
+      if (name === "uv") {
+        const isWindows = process.platform === "win32";
+        const errno = require("node:os").constants.errno;
+        return {
+          UV_UNKNOWN: -4094,
+          UV_EBADF: isWindows ? -4083 : -errno.EBADF,
+          UV_EINVAL: isWindows ? -4071 : -errno.EINVAL,
+          UV_ENOTSOCK: isWindows ? -4056 : -errno.ENOTSOCK,
+        };
+      }
+      throw new Error(`internalBinding(${JSON.stringify(name)}) is not exposed in Bun`);
+    },
+  },
 };
 
 export const fs = require("node:fs/promises").$data;

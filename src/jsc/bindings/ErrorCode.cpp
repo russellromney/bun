@@ -575,38 +575,82 @@ WTF::String ERR_INVALID_ARG_TYPE(JSC::ThrowScope& scope, JSC::JSGlobalObject* gl
     result.append("The "_s);
     addParameter(result, arg_name);
     result.append(" must be "_s);
-    result.append("of type "_s);
+
+    // Mirrors Node's ERR_INVALID_ARG_TYPE (lib/internal/errors.js): expected
+    // entries are split into primitive type names, class names, and free-form
+    // phrases, each rendered with its own prefix.
+    static constexpr ASCIILiteral kPrimitiveTypes[] = {
+        "string"_s, "function"_s, "number"_s, "object"_s,
+        "Function"_s, "Object"_s, "boolean"_s, "bigint"_s, "symbol"_s
+    };
+    auto isPrimitiveType = [&](const WTF::String& value) -> bool {
+        for (auto& type : kPrimitiveTypes) {
+            if (value == type)
+                return true;
+        }
+        return false;
+    };
+    // Node's classRegExp: /^[A-Z][a-zA-Z0-9]*$/
+    auto isClassName = [](const WTF::String& value) -> bool {
+        if (value.isEmpty() || !isASCIIUpper(value[0]))
+            return false;
+        for (unsigned i = 1; i < value.length(); i++) {
+            if (!isASCIIAlphanumeric(value[i]))
+                return false;
+        }
+        return true;
+    };
+
+    WTF::Vector<WTF::String> types;
+    WTF::Vector<WTF::String> instances;
+    WTF::Vector<WTF::String> other;
 
     unsigned length = expected_types.size();
-    if (length == 1) {
-        auto* str = expected_types.at(0).toString(globalObject);
+    for (unsigned i = 0; i < length; i++) {
+        auto* str = expected_types.at(i).toString(globalObject);
         RETURN_IF_EXCEPTION(scope, {});
-        result.append(str->view(globalObject));
+        auto view = str->view(globalObject);
         RETURN_IF_EXCEPTION(scope, {});
-    } else if (length == 2) {
-        auto* str1 = expected_types.at(0).toString(globalObject);
-        RETURN_IF_EXCEPTION(scope, {});
-        result.append(str1->view(globalObject));
-        RETURN_IF_EXCEPTION(scope, {});
-        result.append(" or "_s);
-        auto* str2 = expected_types.at(1).toString(globalObject);
-        RETURN_IF_EXCEPTION(scope, {});
-        result.append(str2->view(globalObject));
-        RETURN_IF_EXCEPTION(scope, {});
-    } else {
-        for (unsigned i = 0, end = length - 1; i < end; i++) {
-            JSValue expected_type = expected_types.at(i);
-            auto* str = expected_type.toString(globalObject);
-            RETURN_IF_EXCEPTION(scope, {});
-            result.append(str->view(globalObject));
-            RETURN_IF_EXCEPTION(scope, {});
-            result.append(", "_s);
+        WTF::String value = view->toString();
+        if (isPrimitiveType(value))
+            types.append(value.convertToASCIILowercase());
+        else if (isClassName(value))
+            instances.append(value);
+        else
+            other.append(value);
+    }
+
+    // Special handle `object` in case other instances are allowed to outline
+    // the differences between each other.
+    if (instances.size() > 0) {
+        bool removed = types.removeFirst("object"_s);
+        if (removed)
+            instances.append("Object"_s);
+    }
+
+    if (types.size() > 0) {
+        result.append(types.size() > 1 ? "one of type "_s : "of type "_s);
+        addList(result, types);
+        if (instances.size() > 0 || other.size() > 0)
+            result.append(" or "_s);
+    }
+
+    if (instances.size() > 0) {
+        result.append("an instance of "_s);
+        addList(result, instances);
+        if (other.size() > 0)
+            result.append(" or "_s);
+    }
+
+    if (other.size() > 0) {
+        if (other.size() > 1) {
+            result.append("one of "_s);
+            addList(result, other);
+        } else {
+            if (other.at(0) != other.at(0).convertToASCIILowercase())
+                result.append("an "_s);
+            result.append(other.at(0));
         }
-        result.append("or "_s);
-        auto* str = expected_types.at(length - 1).toString(globalObject);
-        RETURN_IF_EXCEPTION(scope, {});
-        result.append(str->view(globalObject));
-        RETURN_IF_EXCEPTION(scope, {});
     }
 
     result.append(". Received "_s);
@@ -2438,7 +2482,7 @@ JSC_DEFINE_HOST_FUNCTION(Bun::jsFunctionMakeErrorWithCode, (JSC::JSGlobalObject 
     case ErrorCode::ERR_SOCKET_DGRAM_NOT_CONNECTED:
         return JSC::JSValue::encode(createError(globalObject, ErrorCode::ERR_SOCKET_DGRAM_NOT_CONNECTED, "Not connected"_s));
     case ErrorCode::ERR_SOCKET_DGRAM_NOT_RUNNING:
-        return JSC::JSValue::encode(createError(globalObject, ErrorCode::ERR_SOCKET_DGRAM_NOT_RUNNING, "Socket is not running"_s));
+        return JSC::JSValue::encode(createError(globalObject, ErrorCode::ERR_SOCKET_DGRAM_NOT_RUNNING, "Not running"_s));
     case ErrorCode::ERR_INVALID_CURSOR_POS:
         return JSC::JSValue::encode(createError(globalObject, ErrorCode::ERR_INVALID_CURSOR_POS, "Cannot set cursor row without setting its column"_s));
     case ErrorCode::ERR_INVALID_HANDLE_TYPE:

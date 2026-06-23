@@ -40,17 +40,18 @@ const enum uSockets {
   LISTEN_DISALLOW_REUSE_PORT_FAILURE = 32,
 }
 
-const kStateSymbol = Symbol("state symbol");
+const { kStateSymbol } = require("internal/dgram");
 const kOwnerSymbol = Symbol("owner symbol");
 const async_id_symbol = Symbol("async_id_symbol");
 
-const { throwNotImplemented } = require("internal/shared");
+const { throwNotImplemented, ErrnoException, ExceptionWithHostPort } = require("internal/shared");
 const {
   validateString,
   validateNumber,
   validateFunction,
   validatePort,
   validateAbortSignal,
+  validateUint32,
 } = require("internal/validators");
 
 const { isIP } = require("internal/net/isIP");
@@ -73,6 +74,16 @@ class ERR_SOCKET_BUFFER_SIZE extends Error {
 
 function isInt32(value) {
   return value === (value | 0);
+}
+
+// libuv-style negative errno used where Node reports uv error codes (EBADF is 9
+// on every supported POSIX platform; Windows uses libuv's own UV_EBADF value).
+const UV_EBADF = process.platform === "win32" ? -4083 : -9;
+
+let BlockList;
+function isBlockList(value) {
+  BlockList ??= $zig("node_net_binding.zig", "BlockList");
+  return BlockList.isBlockList(value);
 }
 
 // placeholder
@@ -108,7 +119,15 @@ function newHandle(type, lookup) {
     validateFunction(lookup, "lookup");
   }
 
-  const handle = {};
+  const handle = {
+    socket: undefined,
+    queueSize: 0,
+    queueCount: 0,
+    queueFlushScheduled: false,
+    send: handleSend,
+    getSendQueueSize: handleGetSendQueueSize,
+    getSendQueueCount: handleGetSendQueueCount,
+  };
   if (type === "udp4") {
     handle.lookup = FunctionPrototypeBind.$call(lookup4, handle, lookup);
   } else if (type === "udp6") {
@@ -120,6 +139,69 @@ function newHandle(type, lookup) {
   handle.onmessage = onMessage;
 
   return handle;
+}
+
+// Mirrors the libuv UDP wrap's send(): returns sentBytes + 1 on synchronous
+// success, 0 when nothing was written, or a negative uv errno on failure.
+// The connected form omits port/address: send(req, list, count, hasCallback).
+function handleSend(req, list, count, port, address, hasCallback) {
+  if (typeof port === "boolean") {
+    hasCallback = port;
+    port = undefined;
+    address = undefined;
+  }
+
+  const socket = this.socket;
+  if (!socket) {
+    return UV_EBADF;
+  }
+
+  let data;
+  if (count === 1) {
+    const { buffer, byteOffset, byteLength } = list[0];
+    data = new $Buffer(buffer).slice(byteOffset).slice(0, byteLength);
+  } else {
+    data = Buffer.concat(list);
+  }
+
+  let success;
+  try {
+    if (port) {
+      success = socket.send(data, port, address);
+    } else {
+      success = socket.send(data);
+    }
+  } catch (err) {
+    return typeof err?.errno === "number" && err.errno < 0 ? err.errno : UV_EBADF;
+  }
+
+  // libuv on POSIX leaves outgoing datagrams in the handle's send queue until
+  // the next loop turn; emulate that observable for getSendQueueSize/Count.
+  // Windows (WSASend) reports an empty queue, matching libuv there too.
+  if (process.platform !== "win32") {
+    this.queueSize += data.byteLength;
+    this.queueCount += 1;
+    if (!this.queueFlushScheduled) {
+      this.queueFlushScheduled = true;
+      process.nextTick(flushSendQueueInfo, this);
+    }
+  }
+
+  return (success ? data.byteLength : 0) + 1;
+}
+
+function flushSendQueueInfo(handle) {
+  handle.queueFlushScheduled = false;
+  handle.queueSize = 0;
+  handle.queueCount = 0;
+}
+
+function handleGetSendQueueSize() {
+  return this.queueSize;
+}
+
+function handleGetSendQueueCount() {
+  return this.queueCount;
 }
 
 function onMessage(nread, handle, buf, rinfo) {
@@ -144,14 +226,34 @@ function Socket(type, listener) {
   let lookup;
   let recvBufferSize;
   let sendBufferSize;
+  let receiveBlockList;
+  let sendBlockList;
 
   let options;
   if (type !== null && typeof type === "object") {
     options = type;
     type = options.type;
     lookup = options.lookup;
+    if (options.recvBufferSize) {
+      validateUint32(options.recvBufferSize, "options.recvBufferSize");
+    }
+    if (options.sendBufferSize) {
+      validateUint32(options.sendBufferSize, "options.sendBufferSize");
+    }
     recvBufferSize = options.recvBufferSize;
     sendBufferSize = options.sendBufferSize;
+    if (options.receiveBlockList) {
+      if (!isBlockList(options.receiveBlockList)) {
+        throw $ERR_INVALID_ARG_TYPE("options.receiveBlockList", "net.BlockList", options.receiveBlockList);
+      }
+      receiveBlockList = options.receiveBlockList;
+    }
+    if (options.sendBlockList) {
+      if (!isBlockList(options.sendBlockList)) {
+        throw $ERR_INVALID_ARG_TYPE("options.sendBlockList", "net.BlockList", options.sendBlockList);
+      }
+      sendBlockList = options.sendBlockList;
+    }
   }
 
   const handle = newHandle(type, lookup);
@@ -173,6 +275,8 @@ function Socket(type, listener) {
     ipv6Only: options && options.ipv6Only,
     recvBufferSize,
     sendBufferSize,
+    receiveBlockList,
+    sendBlockList,
     unrefOnBind: false,
   };
 
@@ -315,6 +419,7 @@ Socket.prototype.bind = function (port_, address_ /* , callback */) {
 
     // TODO flags
     const family = this.type === "udp4" ? "IPv4" : "IPv6";
+    const familyLower = this.type === "udp4" ? "ipv4" : "ipv6";
     try {
       Bun.udpSocket({
         hostname: ip,
@@ -322,6 +427,9 @@ Socket.prototype.bind = function (port_, address_ /* , callback */) {
         flags,
         socket: {
           data: (_socket, data, port, address) => {
+            if (state.receiveBlockList?.check(address, familyLower)) {
+              return;
+            }
             this.emit("message", data, {
               port: port,
               address: address,
@@ -402,6 +510,10 @@ const connectFn = $newZigFunction("udp_socket.zig", "UDPSocket.jsConnect", 2);
 function doConnect(ex, self, ip, address, port, callback) {
   const state = self[kStateSymbol];
   if (!state.handle) return;
+
+  if (!ex && state.sendBlockList?.check(ip, `ipv${isIP(ip)}`)) {
+    ex = $ERR_IP_BLOCKED(ip);
+  }
 
   if (!ex) {
     try {
@@ -615,54 +727,17 @@ function doSend(ex, self, ip, list, address, port, callback) {
   if (!state.handle) {
     return;
   }
-  const socket = state.handle.socket;
-  if (!socket) {
+
+  if (ip && state.sendBlockList?.check(ip, `ipv${isIP(ip)}`)) {
+    if (callback) {
+      process.nextTick(callback, $ERR_IP_BLOCKED(ip));
+    }
     return;
   }
 
-  let err = null;
-  let success = false;
-  let data;
-  if (list === undefined) data = new $Buffer(0);
-  else if (Array.isArray(list) && list.length === 1) {
-    const { buffer, byteOffset, byteLength } = list[0];
-    data = new $Buffer(buffer).slice(byteOffset).slice(0, byteLength);
-  } else data = Buffer.concat(list);
-  try {
-    if (port) {
-      success = socket.send(data, port, ip);
-    } else {
-      success = socket.send(data);
-    }
-  } catch (e) {
-    err = e;
-  }
-  // TODO check if this makes sense
-  if (callback) {
-    if (err) {
-      err.address = ip;
-      err.port = port;
-      err.message = `send ${err.code} ${ip}:${port}`;
-      process.nextTick(callback, err);
-    } else {
-      const sent = success ? data.byteLength : 0;
-      process.nextTick(callback, null, sent);
-    }
-  }
-
-  /*
-  const req = new SendWrap();
-  req.list = list; // Keep reference alive.
-  req.address = address;
-  req.port = port;
-  if (callback) {
-    req.callback = callback;
-    req.oncomplete = afterSend;
-  }
-
   let err;
-  if (port) err = state.handle.send(req, list, list.length, port, ip, !!callback);
-  else err = state.handle.send(req, list, list.length, !!callback);
+  if (port) err = state.handle.send(null, list, list.length, port, ip, !!callback);
+  else err = state.handle.send(null, list, list.length, !!callback);
 
   if (err >= 1) {
     // Synchronous finish. The return code is msg_length + 1 so that we can
@@ -676,20 +751,7 @@ function doSend(ex, self, ip, list, address, port, callback) {
     const ex = new ExceptionWithHostPort(err, "send", address, port);
     process.nextTick(callback, ex);
   }
-  */
 }
-
-/*
-function afterSend(err, sent) {
-  if (err) {
-    err = new ExceptionWithHostPort(err, 'send', this.address, this.port);
-  } else {
-    err = null;
-  }
-
-  this.callback(err, sent);
-}
-*/
 
 Socket.prototype.close = function (callback) {
   const state = this[kStateSymbol];
@@ -731,8 +793,12 @@ function socketCloseNT(self) {
 }
 
 Socket.prototype.address = function () {
+  healthCheck(this);
+
+  // Node calls getsockname() on the (lazily created, still fd-less) handle,
+  // which reports EBADF until the socket is bound.
   const addr = this[kStateSymbol].handle.socket?.address;
-  if (!addr) throw $ERR_SOCKET_DGRAM_NOT_RUNNING();
+  if (!addr) throw new ErrnoException(UV_EBADF, "getsockname");
   return addr;
 };
 
@@ -758,27 +824,33 @@ Socket.prototype.setBroadcast = function (arg) {
 };
 
 Socket.prototype.setTTL = function (ttl) {
-  if (typeof ttl !== "number") {
-    throw $ERR_INVALID_ARG_TYPE("ttl", "number", ttl);
-  }
+  validateNumber(ttl, "ttl");
 
   const handle = this[kStateSymbol].handle;
   if (!handle?.socket) {
-    throw new Error("setTTL EBADF");
+    throw new ErrnoException(UV_EBADF, "setTTL");
   }
-  return handle.socket.setTTL(ttl);
+  try {
+    handle.socket.setTTL(ttl);
+  } catch (err) {
+    throw new ErrnoException(err.errno, "setTTL");
+  }
+  return ttl;
 };
 
 Socket.prototype.setMulticastTTL = function (ttl) {
-  if (typeof ttl !== "number") {
-    throw $ERR_INVALID_ARG_TYPE("ttl", "number", ttl);
-  }
+  validateNumber(ttl, "ttl");
 
   const handle = this[kStateSymbol].handle;
   if (!handle?.socket) {
-    throw new Error("setMulticastTTL EBADF");
+    throw new ErrnoException(UV_EBADF, "setMulticastTTL");
   }
-  return handle.socket.setMulticastTTL(ttl);
+  try {
+    handle.socket.setMulticastTTL(ttl);
+  } catch (err) {
+    throw new ErrnoException(err.errno, "setMulticastTTL");
+  }
+  return ttl;
 };
 
 Socket.prototype.setMulticastLoopback = function (arg) {
@@ -916,13 +988,11 @@ Socket.prototype.getSendBufferSize = function () {
 };
 
 Socket.prototype.getSendQueueSize = function () {
-  return 0;
-  // return this[kStateSymbol].handle.getSendQueueSize();
+  return this[kStateSymbol].handle.getSendQueueSize();
 };
 
 Socket.prototype.getSendQueueCount = function () {
-  return 0;
-  // return this[kStateSymbol].handle.getSendQueueCount();
+  return this[kStateSymbol].handle.getSendQueueCount();
 };
 
 // Deprecated private APIs.
