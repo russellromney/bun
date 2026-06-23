@@ -524,6 +524,11 @@ function SocketEmitEndNT(self, _err?) {
     }
     self[kended] = true;
     self.push(null);
+    // Like Node's onStreamRead EOF path: trigger 'end' (and the
+    // allowHalfOpen=false write-side teardown it drives) even when nothing is
+    // reading the socket — accepted sockets are no longer force-resumed into
+    // flowing mode.
+    self.read(0);
   } else if (_err && !self.destroyed) {
     // An error excluded from the synthesis above (teardown noise, or no
     // listener attached): nothing more is coming, but the socket still has to
