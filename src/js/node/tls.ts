@@ -225,6 +225,22 @@ function validateSecureProtocol(secureProtocol) {
   }
 }
 
+// Group names (and their aliases) BoringSSL's SSL_CTX_set1_curves_list accepts:
+// vendor/boringssl/ssl/ssl_key_share.cc kNamedGroups.
+const SUPPORTED_ECDH_GROUPS = new Set([
+  "P-256",
+  "prime256v1",
+  "P-384",
+  "secp384r1",
+  "P-521",
+  "secp521r1",
+  "X25519",
+  "x25519",
+  "X25519Kyber768Draft00",
+  "X25519MLKEM768",
+  "MLKEM1024",
+]);
+
 function validateSecureContextOptions(options) {
   const {
     ciphers,
@@ -241,7 +257,20 @@ function validateSecureContextOptions(options) {
   validateSecureProtocol(secureProtocol);
   if (ciphers !== undefined && ciphers !== null) validateString(ciphers, "options.ciphers");
   if (passphrase !== undefined && passphrase !== null) validateString(passphrase, "options.passphrase");
-  if (ecdhCurve !== undefined && ecdhCurve !== null) validateString(ecdhCurve, "options.ecdhCurve");
+  if (ecdhCurve !== undefined && ecdhCurve !== null) {
+    validateString(ecdhCurve, "options.ecdhCurve");
+    // Mirrors Node's SetECDHCurve failure: SSL_CTX_set1_curves_list rejects the
+    // whole string when any entry is not a group BoringSSL supports
+    // (vendor/boringssl/ssl/ssl_key_share.cc kNamedGroups; "auto" is handled
+    // before reaching OpenSSL in Node and accepts the default group list).
+    if (ecdhCurve !== "auto") {
+      for (const curve of ecdhCurve.split(":")) {
+        if (!SUPPORTED_ECDH_GROUPS.has(curve)) {
+          throw new Error("Failed to set ECDH curve");
+        }
+      }
+    }
+  }
   // clientCertEngine must be a string (engine name); a provided engine then
   // fails because BoringSSL (which Bun always uses) has no OpenSSL ENGINE
   // support, matching Node's setClientCertEngine. Node:
