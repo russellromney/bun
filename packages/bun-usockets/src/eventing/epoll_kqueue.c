@@ -414,11 +414,17 @@ void us_loop_run_bun_tick(struct us_loop_t *loop, const struct timespec* timeout
 
     if (will_idle_inside_event_loop) {
         const uint64_t idle_end_ns = us_loop_monotonic_ns();
-        /* Clear the in-progress marker before crediting the total, so a reader
-         * never sees both (which would double-count the just-finished wait). */
+        /* Clear the in-progress marker, then credit the total. The credit is a
+         * release store and the reader loads idle_time_ns with acquire, so a
+         * reader that observes the credited total also observes the cleared
+         * marker (never both, which would double-count the just-finished wait).
+         * A reader landing between the two stores sees a slightly-low idle
+         * instead, which is acceptable. Release on the clear alone would not
+         * order the later credit, so on weak-memory targets the credit could
+         * become visible first without the acquire/release pairing below. */
         __atomic_store_n(&loop->data.idle_entry_ns, 0, __ATOMIC_RELEASE);
         if (idle_end_ns > idle_start_ns)
-            __atomic_add_fetch(&loop->data.idle_time_ns, idle_end_ns - idle_start_ns, __ATOMIC_RELAXED);
+            __atomic_add_fetch(&loop->data.idle_time_ns, idle_end_ns - idle_start_ns, __ATOMIC_RELEASE);
     }
 
     us_internal_dispatch_ready_polls(loop);

@@ -55,7 +55,10 @@ void us_loop_event_loop_utilization(struct us_loop_t *loop, uint64_t *idle_ns_ou
     /* libuv folds any in-progress provider wait into this value itself. */
     uint64_t idle_ns = uv_metrics_idle_time(loop->uv_loop);
 #else
-    uint64_t idle_ns = __atomic_load_n(&loop->data.idle_time_ns, __ATOMIC_RELAXED);
+    /* Acquire pairs with the release credit in us_loop_run_bun_tick: if we see
+     * a just-credited idle_time_ns we also see the cleared idle_entry_ns below,
+     * so an in-progress wait is never counted twice. */
+    uint64_t idle_ns = __atomic_load_n(&loop->data.idle_time_ns, __ATOMIC_ACQUIRE);
     /* If the loop is blocked in the provider right now, credit the elapsed part
      * of that wait to idle (it is not yet added to idle_time_ns). Without this a
      * loop sampled mid-wait looks fully active. */
