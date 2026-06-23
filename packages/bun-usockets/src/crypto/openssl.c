@@ -470,6 +470,10 @@ static void ssl_update_handshake(struct us_socket_t *s);
  * re-enters the SSL layer). */
 
 int passphrase_cb(char *buf, int size, int rwflag, void *u) {
+  /* No passphrase configured: behave like Node's PasswordCallback and try an
+   * empty password, so an encrypted key fails with BAD_DECRYPT instead of
+   * BoringSSL's default callback failing with BAD_PASSWORD_READ. */
+  if (u == NULL) return 0;
   const char *passphrase = (const char *)u;
   size_t passphrase_length = strlen(passphrase);
   if (passphrase_length > (size_t)size) return -1;
@@ -889,8 +893,10 @@ SSL_CTX *us_ssl_ctx_build_raw(struct us_bun_socket_context_options_t options,
 #else
     SSL_CTX_set_default_passwd_cb_userdata(ssl_context, (void *)strdup(options.passphrase));
 #endif
-    SSL_CTX_set_default_passwd_cb(ssl_context, passphrase_cb);
   }
+  /* Installed unconditionally: with no userdata it supplies an empty password
+   * (see passphrase_cb), matching Node's key-decryption error shape. */
+  SSL_CTX_set_default_passwd_cb(ssl_context, passphrase_cb);
 
   /* Multiple identities (e.g. an RSA and an EC pair, the way Node accepts
    * arrays of key/cert or several pfx entries) must be loaded pair-wise:
@@ -1651,7 +1657,7 @@ static void ssl_update_handshake(struct us_socket_t *s) {
       if (err == SSL_ERROR_SSL || err == SSL_ERROR_SYSCALL) {
         struct loop_ssl_data *loop_ssl_data =
             (struct loop_ssl_data *) s->group->loop->data.ssl_data;
-        unsigned long ssl_queue_err = ERR_peek_last_error();
+        unsigned long ssl_queue_err = ERR_peek_error();
         if (loop_ssl_data && ssl_queue_err != 0) {
           ERR_error_string_n(ssl_queue_err, loop_ssl_data->ssl_last_fatal_error,
                              sizeof(loop_ssl_data->ssl_last_fatal_error));
@@ -1843,7 +1849,7 @@ restart:
            * mid-handshake socket on this loop, which would then pick up this
            * socket's reason as its own. */
           if (s->ssl_handshake_state != HANDSHAKE_COMPLETED) {
-            unsigned long ssl_queue_err = ERR_peek_last_error();
+            unsigned long ssl_queue_err = ERR_peek_error();
             if (ssl_queue_err != 0) {
               ERR_error_string_n(ssl_queue_err, loop_ssl_data->ssl_last_fatal_error,
                                  sizeof(loop_ssl_data->ssl_last_fatal_error));
