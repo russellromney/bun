@@ -707,6 +707,12 @@ var InternalSecureContext = class SecureContext {
           );
       }
     }
+    // BoringSSL's cipher-list parser has no notion of TLS 1.3 suite names —
+    // Node configures those separately (and BoringSSL does not allow
+    // overriding them), so they must not reach SSL_CTX_set_cipher_list.
+    if (options?.ciphers && StringPrototypeIncludes.$call(options.ciphers, "TLS_")) {
+      options = { ...options, ciphers: stripTls13CipherNames(options.ciphers) };
+    }
     // The native handle (SSL_CTX wrapper) is what's memoised — not this JS
     // object — so per-call fields like `servername` come from THIS call's
     // options while the expensive SSL_CTX is shared.
@@ -1116,7 +1122,7 @@ TLSSocket.prototype[buntls] = function (port, host) {
     session: this[ksession],
     rejectUnauthorized: this._rejectUnauthorized,
     requestCert: this._requestCert,
-    ciphers: this.ciphers,
+    ciphers: this.ciphers && stripTls13CipherNames(this.ciphers),
     // Hand the native SSL_CTX wrapper to upgradeTLS so it can up_ref instead
     // of rebuilding from raw cert/key bytes.
     secureContext: ctx?.context,
@@ -1368,7 +1374,7 @@ function Server(options, secureConnectionListener): void {
         clientRenegotiationLimit: CLIENT_RENEG_LIMIT,
         clientRenegotiationWindow: CLIENT_RENEG_WINDOW,
         contexts: contexts,
-        ciphers: this.ciphers,
+        ciphers: this.ciphers && stripTls13CipherNames(this.ciphers),
         // Translate minVersion/maxVersion/secureProtocol to the integer
         // protocol range the native layer applies (secureProtocol wins, like
         // Node's SecureContext::Init). When none are given the module-level
@@ -1686,21 +1692,41 @@ function setDefaultCACertificates(certs: ReadonlyArray<CACertInput>): void {
     // X509Certificate parse only consumes the first block).
     const text =
       typeof cert === "string" ? cert : Buffer.from(cert.buffer, cert.byteOffset, cert.byteLength).toString("latin1");
-    const blocks = text.includes("-----BEGIN")
-      ? // Keep only the blocks that actually start a PEM certificate: bundle
-        // files routinely begin with comment headers (curl's cacert.pem,
-        // RHEL's ca-bundle.crt) that the lookahead split leaves as a leading
-        // non-PEM element.
-        text.split(/(?=-----BEGIN [A-Z0-9 ]*CERTIFICATE-----)/).filter(block => block.includes("CERTIFICATE-----"))
-      : [cert];
+    // Elements with no PEM certificate block are skipped, like Node's
+    // ArrayOfStringsToX509s (PEM_read_bio_X509 simply finds nothing in them).
+    if (!text.includes("-----BEGIN")) continue;
+    // Keep only the blocks that actually start a PEM certificate: bundle
+    // files routinely begin with comment headers (curl's cacert.pem,
+    // RHEL's ca-bundle.crt) that the lookahead split leaves as a leading
+    // non-PEM element.
+    const blocks = text
+      .split(/(?=-----BEGIN [A-Z0-9 ]*CERTIFICATE-----)/)
+      .filter(block => block.includes("CERTIFICATE-----"));
     for (const block of blocks) {
-      const x509 = new _X509CertificateClass(block as CACertInput);
+      let x509;
+      try {
+        x509 = new _X509CertificateClass(block as CACertInput);
+      } catch (parseError: any) {
+        // A PEM block whose contents do not decode fails the whole call. Node
+        // built against BoringSSL reports PEM_read_bio_X509's failure with
+        // this code (asserted by the openssl_is_boringssl branch of
+        // test-tls-set-default-ca-certificates-recovery.js); keep the real
+        // BoringSSL error message from the parse.
+        const err = new Error(parseError?.message || "Failed to parse certificate") as Error & { code: string };
+        err.code = "ERR_OSSL_PEM_ASN.1_ENCODING_ROUTINES";
+        throw err;
+      }
       const fingerprint = x509.fingerprint256;
       if (!seen.has(fingerprint)) {
         seen.add(fingerprint);
         normalized.push(x509.toString());
       }
     }
+  }
+  // A non-empty input that yields no certificates is an error in Node
+  // (crypto_context.cc: "No valid certificates found in the provided array").
+  if (normalized.length === 0 && certs.length > 0) {
+    throw $ERR_CRYPTO_OPERATION_FAILED("No valid certificates found in the provided array");
   }
   _defaultCACertificatesOverride = normalized;
 }
@@ -1727,6 +1753,13 @@ function getCACertificates(type = "default") {
 
 function tlsCipherFilter(a: string) {
   return !a.startsWith("TLS_");
+}
+
+// Drops TLS 1.3 suite names from a cipher string before it is handed to
+// SSL_CTX_set_cipher_list (see the note in InternalSecureContext).
+function stripTls13CipherNames(ciphers: string): string {
+  if (!StringPrototypeIncludes.$call(ciphers, "TLS_")) return ciphers;
+  return ciphers.split(":").filter(tlsCipherFilter).join(":");
 }
 
 function getDefaultCiphers() {
