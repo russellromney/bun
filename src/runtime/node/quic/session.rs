@@ -109,6 +109,14 @@ const IDX_STATS_DESTROYED_AT: usize = 1;
 const IDX_STATS_CLOSING_AT: usize = 2;
 const IDX_STATS_HANDSHAKE_COMPLETED_AT: usize = 3;
 const IDX_STATS_BYTES_RECEIVED: usize = 5;
+const IDX_STATS_MAX_BYTES_IN_FLIGHT: usize = 10;
+const IDX_STATS_BYTES_IN_FLIGHT: usize = 11;
+const IDX_STATS_CWND: usize = 13;
+const IDX_STATS_LATEST_RTT: usize = 14;
+const IDX_STATS_MIN_RTT: usize = 15;
+const IDX_STATS_RTTVAR: usize = 16;
+const IDX_STATS_SMOOTHED_RTT: usize = 17;
+const IDX_STATS_SSTHRESH: usize = 18;
 const IDX_STATS_PKT_SENT: usize = 19;
 const IDX_STATS_BYTES_SENT: usize = 20;
 const IDX_STATS_PKT_RECV: usize = 21;
@@ -344,6 +352,26 @@ unsafe extern "C" fn extend_max_stream_data_cb(
     0
 }
 
+unsafe extern "C" fn acked_stream_data_offset_cb(
+    _conn: *mut ngtcp2::ngtcp2_conn,
+    stream_id: i64,
+    offset: u64,
+    datalen: u64,
+    user_data: *mut c_void,
+    _stream_user_data: *mut c_void,
+) -> c_int {
+    if user_data.is_null() {
+        return 0;
+    }
+    // SAFETY: `user_data` is the owning QuicSession; pure bookkeeping, no JS.
+    let session = unsafe { &*user_data.cast::<QuicSession>() };
+    if let Some(&stream) = session.streams.get().get(&stream_id) {
+        // SAFETY: streams unregister themselves before teardown.
+        unsafe { (*stream).on_acked(offset, datalen) };
+    }
+    0
+}
+
 fn build_callbacks(is_server: bool) -> ngtcp2::ngtcp2_callbacks {
     let mut cb = ngtcp2::ngtcp2_callbacks::default();
     if is_server {
@@ -368,6 +396,7 @@ fn build_callbacks(is_server: bool) -> ngtcp2::ngtcp2_callbacks {
     cb.stream_close = Some(stream_close_cb);
     cb.stream_reset = Some(stream_reset_cb);
     cb.extend_max_stream_data = Some(extend_max_stream_data_cb);
+    cb.acked_stream_data_offset = Some(acked_stream_data_offset_cb);
     cb
 }
 
@@ -913,7 +942,36 @@ impl QuicSession {
             return;
         }
         self.process_stream_events(global);
+        self.sync_conn_info_stats();
         self.rearm_timer();
+    }
+
+    /// Copy the live congestion/RTT counters from ngtcp2 into the stats
+    /// buffer the JS layer reads (cwnd, rtt, bytes in flight, ...).
+    fn sync_conn_info_stats(&self) {
+        if self.destroyed.get() || self.conn.get().is_null() {
+            return;
+        }
+        let mut info = ngtcp2::ngtcp2_conn_info::default();
+        // SAFETY: `conn` is live; `info` is a stack out-param.
+        unsafe {
+            ngtcp2::ngtcp2_conn_get_conn_info_versioned(
+                self.conn.get(),
+                ngtcp2::NGTCP2_CONN_INFO_VERSION,
+                &mut info,
+            );
+        }
+        self.write_stat(
+            IDX_STATS_MAX_BYTES_IN_FLIGHT,
+            self.read_stat(IDX_STATS_MAX_BYTES_IN_FLIGHT).max(info.bytes_in_flight),
+        );
+        self.write_stat(IDX_STATS_BYTES_IN_FLIGHT, info.bytes_in_flight);
+        self.write_stat(IDX_STATS_CWND, info.cwnd);
+        self.write_stat(IDX_STATS_LATEST_RTT, info.latest_rtt);
+        self.write_stat(IDX_STATS_MIN_RTT, info.min_rtt);
+        self.write_stat(IDX_STATS_RTTVAR, info.rttvar);
+        self.write_stat(IDX_STATS_SMOOTHED_RTT, info.smoothed_rtt);
+        self.write_stat(IDX_STATS_SSTHRESH, info.ssthresh);
     }
 
     /// Dispatch the stream activity queued by the ngtcp2 callbacks during the
@@ -1098,23 +1156,25 @@ impl QuicSession {
             .collect();
 
         loop {
-            // Pick the stream (and chunk) to include in this packet, if any.
-            let (stream_id, chunk, fin, stream_ptr): (i64, Vec<u8>, bool, *mut QuicStream) =
+            // Pick the stream (and a stable in-flight chunk of its data) to
+            // include in this packet, if any. ngtcp2 keeps the chunk pointer
+            // until the bytes are acknowledged, so the chunk is owned by the
+            // stream's in-flight list, not this stack frame.
+            let (stream_id, chunk_ptr, chunk_len, fin, stream_ptr): (i64, *const u8, usize, bool, *mut QuicStream) =
                 match pending_streams.last().copied() {
                     Some(stream) => {
                         // SAFETY: as above.
-                        let (chunk, fin) = unsafe {
-                            (*stream).outbound.with_mut(|outbound| {
-                                let take = outbound.data.len().min(MAX_SEND_PACKET);
-                                let chunk: Vec<u8> = outbound.data.iter().copied().take(take).collect();
-                                (chunk, outbound.fin_pending && take == outbound.data.len())
-                            })
+                        let (ptr, len) = unsafe { (*stream).stage_chunk(MAX_SEND_PACKET) };
+                        // SAFETY: as above.
+                        let fin = unsafe {
+                            (*stream).outbound.get().fin_pending
+                                && (*stream).outbound.get().data.len() == len
                         };
                         // SAFETY: as above.
                         let id = unsafe { (*(*stream).state_mut()).id };
-                        (id, chunk, fin, stream)
+                        (id, ptr, len, fin, stream)
                     }
-                    None => (-1, Vec::new(), false, null_mut()),
+                    None => (-1, null(), 0, false, null_mut()),
                 };
 
             let mut path = ngtcp2::ngtcp2_path {
@@ -1124,10 +1184,10 @@ impl QuicSession {
             };
             let mut pi = ngtcp2::ngtcp2_pkt_info::default();
             let mut pdatalen: ngtcp2::ngtcp2_ssize = 0;
-            let datav = ngtcp2::ngtcp2_vec { base: chunk.as_ptr(), len: chunk.len() };
+            let datav = ngtcp2::ngtcp2_vec { base: chunk_ptr, len: chunk_len };
             let flags = if fin { ngtcp2::NGTCP2_WRITE_STREAM_FLAG_FIN } else { ngtcp2::NGTCP2_WRITE_STREAM_FLAG_NONE };
-            // SAFETY: `conn` is live; out-buffers and the data vector are
-            // stack locals valid across the call.
+            // SAFETY: `conn` is live; the data vector points into the stream's
+            // in-flight chunk, which outlives the connection's use of it.
             let n = unsafe {
                 ngtcp2::ngtcp2_conn_writev_stream_versioned(
                     self.conn.get(),
@@ -1139,11 +1199,19 @@ impl QuicSession {
                     &mut pdatalen,
                     flags,
                     stream_id,
-                    if chunk.is_empty() { null() } else { &datav },
-                    if chunk.is_empty() { 0 } else { 1 },
+                    if chunk_len == 0 { null() } else { &datav },
+                    if chunk_len == 0 { 0 } else { 1 },
                     now_ns(),
                 )
             };
+
+            // Settle the staged chunk according to what ngtcp2 accepted.
+            let accepted = if pdatalen > 0 { pdatalen as usize } else { 0 };
+            if !stream_ptr.is_null() && chunk_len > 0 {
+                // SAFETY: as above.
+                unsafe { (*stream_ptr).commit_staged(if n >= 0 { accepted } else { 0 }) };
+            }
+
             if n < 0 {
                 let rv = n as c_int;
                 match rv {
@@ -1165,19 +1233,7 @@ impl QuicSession {
                 }
             }
 
-            // Account for the stream bytes (and FIN) ngtcp2 accepted into this
-            // packet. pdatalen is -1 when no stream frame was included.
             if !stream_ptr.is_null() && n > 0 {
-                if pdatalen > 0 {
-                    let consumed = pdatalen as usize;
-                    // SAFETY: as above.
-                    unsafe {
-                        (*stream_ptr).outbound.with_mut(|outbound| {
-                            let len = outbound.data.len();
-                            outbound.data.drain(..consumed.min(len));
-                        });
-                    }
-                }
                 // SAFETY: as above.
                 let drained = unsafe { (*stream_ptr).outbound.get().data.is_empty() };
                 if fin && pdatalen >= 0 && drained {

@@ -72,11 +72,28 @@ const PULL_STATUS_DATA: f64 = 1.0;
 const PULL_STATUS_BLOCKED: f64 = 2.0;
 const PULL_STATUS_ERROR: f64 = -1.0;
 
+/// One chunk of stream data that has been handed to ngtcp2. ngtcp2 keeps the
+/// pointer until the bytes are acknowledged, so the allocation must stay
+/// alive (and at a stable address) until `acked` covers it.
+pub(super) struct InflightChunk {
+    pub bytes: Box<[u8]>,
+    /// Stream offset of the first byte of `bytes`.
+    pub start: u64,
+    /// How many bytes of `bytes` ngtcp2 actually accepted.
+    pub accepted: usize,
+}
+
 /// Outbound body data queued for transmission.
 #[derive(Default)]
 pub(super) struct Outbound {
     /// Bytes not yet handed to ngtcp2.
     pub data: VecDeque<u8>,
+    /// Chunks handed to ngtcp2 that are not yet fully acknowledged.
+    pub inflight: Vec<InflightChunk>,
+    /// Total bytes accepted by ngtcp2 so far (the next chunk's stream offset).
+    pub submitted: u64,
+    /// Contiguously acknowledged prefix of the stream.
+    pub acked: u64,
     /// The writable side ends once `data` drains.
     pub fin_pending: bool,
     /// `true` once a source was attached or the streaming source started.
@@ -258,6 +275,60 @@ impl QuicStream {
         // SAFETY: state buffer is live while the wrapper is.
         let fin_sent = unsafe { (*self.state_mut()).fin_sent } != 0;
         !outbound.data.is_empty() || (outbound.fin_pending && !fin_sent)
+    }
+
+    /// Move up to `max` queued bytes into a stable in-flight chunk and return
+    /// its pointer/length for ngtcp2. The chunk stays owned by the stream
+    /// until the peer acknowledges it (`on_acked`).
+    pub(super) fn stage_chunk(&self, max: usize) -> (*const u8, usize) {
+        self.outbound.with_mut(|outbound| {
+            let take = outbound.data.len().min(max);
+            if take == 0 {
+                return (core::ptr::null(), 0);
+            }
+            let bytes: Box<[u8]> = outbound.data.iter().copied().take(take).collect();
+            let ptr = bytes.as_ptr();
+            outbound.inflight.push(InflightChunk { bytes, start: outbound.submitted, accepted: 0 });
+            (ptr, take)
+        })
+    }
+
+    /// Record how much of the most recently staged chunk ngtcp2 accepted.
+    /// The unaccepted tail returns to the head of the unsent queue; a chunk
+    /// nothing was taken from is dropped again (ngtcp2 retained no pointer).
+    pub(super) fn commit_staged(&self, accepted: usize) {
+        self.outbound.with_mut(|outbound| {
+            let Some(mut chunk) = outbound.inflight.pop() else { return };
+            let staged = chunk.bytes.len();
+            let accepted = accepted.min(staged);
+            // Remove the staged bytes from the unsent queue.
+            outbound.data.drain(..staged.min(outbound.data.len()));
+            // Anything ngtcp2 did not take goes back to the front, in order.
+            for &byte in chunk.bytes[accepted..].iter().rev() {
+                outbound.data.push_front(byte);
+            }
+            if accepted == 0 {
+                return;
+            }
+            chunk.accepted = accepted;
+            outbound.submitted += accepted as u64;
+            outbound.inflight.push(chunk);
+        });
+    }
+
+    /// The peer acknowledged stream data up to `offset + datalen`; in-flight
+    /// chunks fully covered by the acknowledged prefix can be released.
+    pub(super) fn on_acked(&self, offset: u64, datalen: u64) {
+        self.outbound.with_mut(|outbound| {
+            let acked_to = offset.saturating_add(datalen);
+            if acked_to > outbound.acked {
+                outbound.acked = acked_to;
+            }
+            let acked = outbound.acked;
+            outbound
+                .inflight
+                .retain(|chunk| chunk.start + chunk.accepted as u64 > acked);
+        });
     }
 
     /// Refresh the streaming-source backpressure window after the write loop
