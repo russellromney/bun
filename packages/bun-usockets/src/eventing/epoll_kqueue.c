@@ -384,12 +384,16 @@ void us_loop_run_bun_tick(struct us_loop_t *loop, const struct timespec* timeout
         Bun__JSC_onBeforeWait(loop->data.jsc_vm);
 
     /* Measure time blocked in the event provider for
-     * performance.eventLoopUtilization(). Only count a real idle wait (non-zero
-     * timeout, no pending wakeups); a zero-timeout poll-through is not idle.
-     * Publish the wait's start so a cross-thread reader can credit the
-     * in-progress wait to idle instead of active (mirrors libuv). */
-    const uint64_t idle_start_ns = will_idle_inside_event_loop ? us_loop_monotonic_ns() : 0;
-    if (will_idle_inside_event_loop)
+     * performance.eventLoopUtilization(). Gate on the timeout only (like libuv),
+     * NOT on will_idle_inside_event_loop: a stale pending_wakeups (the wakeup
+     * eventfd is edge-triggered and consumed by the previous tick's dispatch,
+     * but pending_wakeups is only cleared by the exchange above) would make
+     * will_idle false while the provider still blocks, mis-attributing the wait
+     * to active. A zero-timeout poll-through is not idle. Publish the wait's
+     * start so a cross-thread reader can credit the in-progress wait to idle. */
+    const int will_track_idle = !timeout || (timeout->tv_nsec != 0 || timeout->tv_sec != 0);
+    const uint64_t idle_start_ns = will_track_idle ? us_loop_monotonic_ns() : 0;
+    if (will_track_idle)
         __atomic_store_n(&loop->data.idle_entry_ns, idle_start_ns, __ATOMIC_RELEASE);
 
     /* Fetch ready polls */
@@ -412,7 +416,7 @@ void us_loop_run_bun_tick(struct us_loop_t *loop, const struct timespec* timeout
     } while (IS_EINTR(loop->num_ready_polls));
 #endif
 
-    if (will_idle_inside_event_loop) {
+    if (will_track_idle) {
         const uint64_t idle_end_ns = us_loop_monotonic_ns();
         /* Clear the in-progress marker, then credit the total. The credit is a
          * release store and the reader loads idle_time_ns with acquire, so a

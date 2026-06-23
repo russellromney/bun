@@ -737,3 +737,42 @@ test("worker.performance.eventLoopUtilization() reports low utilization for an i
     if (!terminated) await worker.terminate();
   }
 });
+
+// https://github.com/oven-sh/bun/issues/32609
+test("worker.performance.eventLoopUtilization() stays low for a message-driven idle worker", async () => {
+  using dir = tempDir("wt-elu-msg", {
+    "worker.mjs": `
+      import { parentPort } from "worker_threads";
+      // Handle each message in ~no time and go back to waiting: ~0% busy.
+      parentPort.on("message", () => {});
+      parentPort.postMessage("ready");
+    `,
+  });
+
+  const worker = new Worker(join(String(dir), "worker.mjs"));
+  let terminated = false;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      worker.once("message", () => resolve());
+      worker.once("error", reject);
+    });
+
+    const elu1 = worker.performance.eventLoopUtilization();
+    // Drive the worker with periodic messages; each wakes its loop but does
+    // almost no work. The loop is blocked (idle) between messages.
+    for (let i = 0; i < 15; i++) {
+      worker.postMessage(0);
+      await Bun.sleep(20);
+    }
+    const elu2 = worker.performance.eventLoopUtilization(elu1);
+
+    // A worker that only wakes briefly to handle messages must not report as
+    // saturated: the between-message blocks are idle, not active.
+    expect(elu2.utilization).toBeLessThan(0.5);
+
+    await worker.terminate();
+    terminated = true;
+  } finally {
+    if (!terminated) await worker.terminate();
+  }
+});
