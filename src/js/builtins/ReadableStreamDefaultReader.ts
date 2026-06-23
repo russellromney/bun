@@ -25,7 +25,7 @@
 
 export function initializeReadableStreamDefaultReader(this, stream) {
   if (!$isReadableStream(stream)) throw new TypeError("ReadableStreamDefaultReader needs a ReadableStream");
-  if ($isReadableStreamLocked(stream)) throw new TypeError("ReadableStream is locked");
+  if ($isReadableStreamLocked(stream)) throw $ERR_INVALID_STATE_TypeError("ReadableStream is locked");
 
   $readableStreamReaderGenericInitialize(this, stream);
   $putByIdDirectPrivate(this, "readRequests", $createFIFO());

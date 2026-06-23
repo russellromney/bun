@@ -126,20 +126,16 @@ export function initializeWritableStreamSlots(stream, underlyingSink) {
 }
 
 export function writableStreamCloseForBindings(stream) {
-  if ($isWritableStreamLocked(stream))
-    return Promise.$reject($makeTypeError("WritableStream.close method can only be used on non locked WritableStream"));
+  if ($isWritableStreamLocked(stream)) return Promise.$reject($ERR_INVALID_STATE_TypeError("WritableStream is locked"));
 
   if ($writableStreamCloseQueuedOrInFlight(stream))
-    return Promise.$reject(
-      $makeTypeError("WritableStream.close method can only be used on a being close WritableStream"),
-    );
+    return Promise.$reject($ERR_INVALID_STATE_TypeError("Failure closing WritableStream"));
 
   return $writableStreamClose(stream);
 }
 
 export function writableStreamAbortForBindings(stream, reason) {
-  if ($isWritableStreamLocked(stream))
-    return Promise.$reject($makeTypeError("WritableStream.abort method can only be used on non locked WritableStream"));
+  if ($isWritableStreamLocked(stream)) return Promise.$reject($ERR_INVALID_STATE_TypeError("WritableStream is locked"));
 
   return $writableStreamAbort(stream, reason);
 }
@@ -149,7 +145,7 @@ export function isWritableStreamLocked(stream) {
 }
 
 export function setUpWritableStreamDefaultWriter(writer, stream) {
-  if ($isWritableStreamLocked(stream)) $throwTypeError("WritableStream is locked");
+  if ($isWritableStreamLocked(stream)) throw $ERR_INVALID_STATE_TypeError("WritableStream is locked");
 
   $putByIdDirectPrivate(writer, "stream", stream);
   $putByIdDirectPrivate(stream, "writer", writer);

@@ -51,7 +51,7 @@ class ReadableFromWeb extends Readable {
   #stream;
 
   constructor(options, stream) {
-    const { objectMode, highWaterMark, encoding, signal } = options;
+    const { objectMode, highWaterMark, encoding, signal, lazyReader } = options;
     super({
       objectMode,
       highWaterMark,
@@ -59,9 +59,26 @@ class ReadableFromWeb extends Readable {
       signal,
     });
     this.#pendingChunks = [];
-    this.#reader = undefined;
-    this.#stream = stream;
     this.#closed = false;
+
+    if (lazyReader) {
+      // node-fetch's Response#body wrapper must not lock the source until it
+      // is actually read, so Response.prototype.text()/json()/... can still
+      // consume the native body after the body getter has been touched.
+      this.#reader = undefined;
+      this.#stream = stream;
+    } else {
+      // Match Node: lock the source as soon as the adapter exists (an
+      // already-locked stream throws here, not on the first read), and surface
+      // a source error as an 'error' event even if the Readable is never read.
+      const reader = stream.getReader();
+      this.#reader = reader;
+      reader.closed.then(undefined, error => {
+        if (!this.#closed && !this.destroyed) {
+          destroyer(this, error);
+        }
+      });
+    }
   }
 
   #drainPending() {
@@ -95,10 +112,9 @@ class ReadableFromWeb extends Readable {
 
   async _read() {
     $debug("ReadableFromWeb _read()", this.__id);
-    var stream = this.#stream,
-      reader = this.#reader;
-    if (stream) {
-      reader = this.#reader = stream.getReader();
+    var reader = this.#reader;
+    if (reader === undefined) {
+      reader = this.#reader = this.#stream.getReader();
       this.#stream = undefined;
     } else if (this.#drainPending()) {
       return;
@@ -148,13 +164,18 @@ class ReadableFromWeb extends Readable {
 
   _destroy(error, callback) {
     if (!this.#closed) {
+      const done = () => {
+        this.#closed = true;
+        callback(error);
+      };
       var reader = this.#reader;
       if (reader) {
         this.#reader = undefined;
-        reader.cancel(error).finally(() => {
-          this.#closed = true;
-          callback(error);
-        });
+        // cancel() rejects when the stream is already errored; either way the
+        // destroy completes.
+        reader.cancel(error).then(done, done);
+      } else {
+        done();
       }
 
       return;

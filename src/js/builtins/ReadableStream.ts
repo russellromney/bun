@@ -369,6 +369,49 @@ export function createNativeReadableStream(nativePtr, autoAllocateChunkSize) {
   });
 }
 
+// https://streams.spec.whatwg.org/#rs-from
+export function from(asyncIterable) {
+  const iteratorMethod = asyncIterable?.[globalThis.Symbol.asyncIterator] ?? asyncIterable?.[globalThis.Symbol.iterator];
+  if (iteratorMethod == null || typeof iteratorMethod !== "function") {
+    throw $ERR_ARG_NOT_ITERABLE(`${asyncIterable} must be iterable`);
+  }
+  const iterator = iteratorMethod.$call(asyncIterable);
+  if (iterator === null || (typeof iterator !== "object" && typeof iterator !== "function")) {
+    throw $ERR_INVALID_STATE_TypeError("The iterator method must return an object");
+  }
+
+  return new ReadableStream(
+    {
+      async pull(controller) {
+        const iterResult = await iterator.next();
+        if (typeof iterResult !== "object" || iterResult === null) {
+          throw $ERR_INVALID_STATE_TypeError(
+            "The promise returned by the iterator.next() method must fulfill with an object",
+          );
+        }
+        if (iterResult.done) {
+          controller.close();
+        } else {
+          controller.enqueue(await iterResult.value);
+        }
+      },
+      async cancel(reason) {
+        const returnMethod = iterator.return;
+        if (returnMethod === undefined) {
+          return;
+        }
+        const iterResult = await returnMethod.$call(iterator, reason);
+        if (typeof iterResult !== "object" || iterResult === null) {
+          throw $ERR_INVALID_STATE_TypeError(
+            "The promise returned by the iterator.return() method must fulfill with an object",
+          );
+        }
+      },
+    },
+    { highWaterMark: 0 },
+  );
+}
+
 export function cancel(this, reason) {
   if (!$isReadableStream(this)) return Promise.$reject($ERR_INVALID_THIS("ReadableStream"));
 
@@ -427,7 +470,7 @@ export function pipeThrough(this, streams, options) {
 
   if ($isReadableStreamLocked(this)) throw $ERR_INVALID_STATE_TypeError("ReadableStream is locked");
 
-  if ($isWritableStreamLocked(internalWritable)) throw $makeTypeError("WritableStream is locked");
+  if ($isWritableStreamLocked(internalWritable)) throw $ERR_INVALID_STATE_TypeError("WritableStream is locked");
 
   const promise = $readableStreamPipeToWritableStream(
     this,
@@ -476,7 +519,7 @@ export function pipeTo(this, destination) {
   if (!$isWritableStream(internalDestination))
     return Promise.$reject(new TypeError("ReadableStream pipeTo requires a WritableStream"));
 
-  if ($isWritableStreamLocked(internalDestination)) return Promise.$reject(new TypeError("WritableStream is locked"));
+  if ($isWritableStreamLocked(internalDestination)) return Promise.$reject($ERR_INVALID_STATE_TypeError("WritableStream is locked"));
 
   return $readableStreamPipeToWritableStream(
     this,

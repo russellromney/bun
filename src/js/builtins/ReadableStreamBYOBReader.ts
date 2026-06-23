@@ -26,7 +26,7 @@ export function initializeReadableStreamBYOBReader(this, stream) {
   if (!$isReadableStream(stream)) throw new TypeError("ReadableStreamBYOBReader needs a ReadableStream");
   if (!$isReadableByteStreamController($getByIdDirectPrivate(stream, "readableStreamController")))
     throw new TypeError("ReadableStreamBYOBReader needs a ReadableByteStreamController");
-  if ($isReadableStreamLocked(stream)) throw new TypeError("ReadableStream is locked");
+  if ($isReadableStreamLocked(stream)) throw $ERR_INVALID_STATE_TypeError("ReadableStream is locked");
 
   $readableStreamReaderGenericInitialize(this, stream);
   $putByIdDirectPrivate(this, "readIntoRequests", $createFIFO());

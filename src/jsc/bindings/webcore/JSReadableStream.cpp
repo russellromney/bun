@@ -154,6 +154,7 @@ template<> void JSReadableStreamDOMConstructor::initializeProperties(VM& vm, JSD
     m_originalName.set(vm, this, nameString);
     putDirect(vm, vm.propertyNames->name, nameString, JSC::PropertyAttribute::ReadOnly | JSC::PropertyAttribute::DontEnum);
     putDirect(vm, vm.propertyNames->prototype, JSReadableStream::prototype(vm, globalObject), JSC::PropertyAttribute::ReadOnly | JSC::PropertyAttribute::DontEnum | JSC::PropertyAttribute::DontDelete);
+    putDirectBuiltinFunction(vm, &globalObject, JSC::Identifier::fromString(vm, "from"_s), readableStreamFromCodeGenerator(vm), static_cast<unsigned>(0));
 }
 
 template<> FunctionExecutable* JSReadableStreamDOMConstructor::initializeExecutable(VM& vm)

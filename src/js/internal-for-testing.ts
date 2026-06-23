@@ -220,7 +220,29 @@ export const exposedInternals = {
   "internal/streams/add-abort-signal": require("internal/streams/add-abort-signal"),
   "internal/async_context_frame": require("internal/async_context_frame"),
   "internal/async_hooks": require("internal/async_hooks"),
+  "internal/webstreams/adapters": require("internal/webstreams_adapters"),
 };
+
+// State of a web ReadableStream/WritableStream for vendored node tests that
+// read Node's `stream[kState].state` / `.storedError` (served through the
+// internal/webstreams/util shim in test/js/node/test/common/index.js).
+export function getWebStreamState(stream: ReadableStream | WritableStream): {
+  state: string;
+  storedError: unknown;
+} {
+  if ($inheritsWritableStream(stream)) {
+    const internalStream = $getInternalWritableStream(stream);
+    return {
+      state: $getByIdDirectPrivate(internalStream, "state"),
+      storedError: $getByIdDirectPrivate(internalStream, "storedError"),
+    };
+  }
+  const state = $getByIdDirectPrivate(stream, "state");
+  return {
+    state: state === $streamClosed ? "closed" : state === $streamErrored ? "errored" : "readable",
+    storedError: $getByIdDirectPrivate(stream, "storedError"),
+  };
+}
 
 export const fs = require("node:fs/promises").$data;
 
