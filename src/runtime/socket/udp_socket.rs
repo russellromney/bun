@@ -277,6 +277,10 @@ pub struct UDPSocketConfig {
     pub connect: Option<ConnectConfig>,
     pub port: u16,
     pub flags: i32,
+    /// Adopt this already-created (and usually bound) socket descriptor
+    /// instead of creating a new one. Used by node:dgram for
+    /// `socket.bind({ fd })` and cluster-shared sockets.
+    pub fd: Option<i32>,
     pub binary_type: BinaryType,
 }
 
@@ -287,6 +291,7 @@ impl Default for UDPSocketConfig {
             connect: None,
             port: 0,
             flags: 0,
+            fd: None,
             binary_type: BinaryType::Buffer,
         }
     }
@@ -322,6 +327,18 @@ impl UDPSocketConfig {
             0
         };
 
+        let fd: Option<i32> = if let Some(value) = options.get_truthy(global_this, "fd")? {
+            let number = value.coerce_to_i32(global_this)?;
+            if number < 0 {
+                return Err(global_this.throw_invalid_arguments(format_args!(
+                    "Expected \"fd\" to be a non-negative integer"
+                )));
+            }
+            Some(number)
+        } else {
+            None
+        };
+
         let hostname = 'brk: {
             if let Some(value) = options.get_truthy(global_this, "hostname")? {
                 if !value.is_string() {
@@ -339,6 +356,7 @@ impl UDPSocketConfig {
             hostname,
             port,
             flags,
+            fd,
             ..Default::default()
         };
 
@@ -567,18 +585,31 @@ impl UDPSocket {
         let config = this.config.get();
         let hostname_z = config.hostname.to_owned_slice_z();
 
-        let created = uws::udp::Socket::create(
-            this.loop_,
-            on_data,
-            on_drain,
-            on_close,
-            on_recv_error,
-            hostname_z.as_ptr(),
-            config.port,
-            config.flags,
-            Some(&mut err),
-            this_ptr.cast::<c_void>(),
-        );
+        let created = if let Some(fd) = config.fd {
+            uws::udp::Socket::create_from_fd(
+                this.loop_,
+                on_data,
+                on_drain,
+                on_close,
+                on_recv_error,
+                fd,
+                Some(&mut err),
+                this_ptr.cast::<c_void>(),
+            )
+        } else {
+            uws::udp::Socket::create(
+                this.loop_,
+                on_data,
+                on_drain,
+                on_close,
+                on_recv_error,
+                hostname_z.as_ptr(),
+                config.port,
+                config.flags,
+                Some(&mut err),
+                this_ptr.cast::<c_void>(),
+            )
+        };
         drop(hostname_z);
         this.socket.set(if created.is_null() {
             None
@@ -592,12 +623,13 @@ impl UDPSocket {
                 let code: &'static str = SystemErrno::init(err as i64)
                     .map(Into::into)
                     .unwrap_or("UNKNOWN");
+                let syscall: &'static str = if config.fd.is_some() { "open" } else { "bind" };
                 let sys_err = SystemError {
                     errno: err,
                     code: BunString::static_(code),
                     message: BunString::create_format(format_args!(
-                        "bind {} {}",
-                        code, config.hostname
+                        "{} {} {}",
+                        syscall, code, config.hostname
                     )),
                     path: BunString::empty(),
                     syscall: BunString::empty(),
@@ -1854,6 +1886,29 @@ impl UDPSocket {
         }
 
         Ok(JSValue::js_number(f64::from(value)))
+    }
+
+    /// Underlying socket descriptor as a number, or -1 once closed. Backs
+    /// node:dgram's handle.fd.
+    // See `js_connect` — codegen `JsClass` derive owns the link name.
+    pub fn js_get_fd(global_this: &JSGlobalObject, call_frame: &CallFrame) -> JsResult<JSValue> {
+        // `as_class_ref` is the safe `&T` downcast (encapsulates `&*from_js`);
+        // mutation goes through `Cell`, so a shared borrow suffices (R-2).
+        let Some(this) = call_frame.this().as_class_ref::<UDPSocket>() else {
+            return Err(
+                global_this.throw_invalid_arguments(format_args!("Expected UDPSocket as 'this'"))
+            );
+        };
+
+        if this.closed.get() {
+            return Ok(JSValue::js_number_from_int32(-1));
+        }
+        let Some(socket) = this.socket.get() else {
+            return Ok(JSValue::js_number_from_int32(-1));
+        };
+        // `Socket` is an `opaque_ffi!` ZST — `opaque_mut` is the safe deref.
+        let fd = uws::udp::Socket::opaque_mut(socket).fd();
+        Ok(JSValue::js_number_from_int32(fd))
     }
 }
 

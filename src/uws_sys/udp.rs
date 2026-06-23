@@ -47,6 +47,38 @@ impl Socket {
         }
     }
 
+    /// Adopts an already created (and usually bound) UDP socket descriptor
+    /// instead of creating a new one. See `us_create_udp_socket_from_fd`.
+    pub fn create_from_fd(
+        loop_: *mut Loop,
+        data_cb: extern "C" fn(*mut Socket, *mut PacketBuffer, c_int),
+        drain_cb: extern "C" fn(*mut Socket),
+        close_cb: extern "C" fn(*mut Socket),
+        recv_error_cb: extern "C" fn(*mut Socket, c_int),
+        fd: c_int,
+        err: Option<&mut c_int>,
+        user_data: *mut c_void,
+    ) -> *mut Socket {
+        // SAFETY: thin wrapper over us_create_udp_socket_from_fd; all pointer
+        // args are forwarded as-is from the caller, who upholds uSockets'
+        // contract.
+        unsafe {
+            us_create_udp_socket_from_fd(
+                loop_,
+                data_cb,
+                drain_cb,
+                close_cb,
+                recv_error_cb,
+                fd,
+                match err {
+                    Some(e) => std::ptr::from_mut::<c_int>(e),
+                    None => core::ptr::null_mut(),
+                },
+                user_data,
+            )
+        }
+    }
+
     pub fn send(
         &mut self,
         payloads: &[*const u8],
@@ -103,6 +135,11 @@ impl Socket {
     /// value to `out`, or the failing setsockopt/getsockopt result.
     pub fn buffer_size(&mut self, is_recv: bool, size: i32, out: &mut c_int) -> c_int {
         us_udp_socket_buffer_size(self, is_recv as c_int, size, out)
+    }
+
+    /// Underlying socket descriptor.
+    pub fn fd(&mut self) -> c_int {
+        us_udp_socket_fd(self)
     }
 
     pub fn set_broadcast(&mut self, enabled: bool) -> c_int {
@@ -179,6 +216,17 @@ unsafe extern "C" {
         size: c_int,
         out: &mut c_int,
     ) -> c_int;
+    safe fn us_udp_socket_fd(socket: &mut Socket) -> c_int;
+    fn us_create_udp_socket_from_fd(
+        loop_: *mut Loop,
+        data_cb: extern "C" fn(*mut Socket, *mut PacketBuffer, c_int),
+        drain_cb: extern "C" fn(*mut Socket),
+        close_cb: extern "C" fn(*mut Socket),
+        recv_error_cb: extern "C" fn(*mut Socket, c_int),
+        fd: c_int,
+        err: *mut c_int,
+        user_data: *mut c_void,
+    ) -> *mut Socket;
     safe fn us_udp_socket_set_ttl_unicast(socket: &mut Socket, ttl: c_int) -> c_int;
     safe fn us_udp_socket_set_ttl_multicast(socket: &mut Socket, ttl: c_int) -> c_int;
     safe fn us_udp_socket_set_multicast_loopback(socket: &mut Socket, enabled: c_int) -> c_int;

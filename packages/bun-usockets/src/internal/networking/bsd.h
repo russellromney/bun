@@ -197,6 +197,8 @@ int bsd_socket_get_tos(LIBUS_SOCKET_DESCRIPTOR fd);
  * resulting value to *out; on failure returns the setsockopt/getsockopt result
  * with the error left in errno (WSAGetLastError on Windows). */
 int bsd_socket_buffer_size(LIBUS_SOCKET_DESCRIPTOR fd, int is_recv, int size, int *out);
+void bsd_apply_udp_recv_options(LIBUS_SOCKET_DESCRIPTOR fd, int family);
+int bsd_prepare_adopted_udp_socket(LIBUS_SOCKET_DESCRIPTOR fd);
 void bsd_socket_flush(LIBUS_SOCKET_DESCRIPTOR fd);
 LIBUS_SOCKET_DESCRIPTOR bsd_create_socket(int domain, int type, int protocol, int *err);
 
