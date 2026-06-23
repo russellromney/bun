@@ -711,9 +711,11 @@ impl ErrorCode {
     pub const FS_CP_SYMLINK_TO_SUBDIRECTORY: ErrorCode = ErrorCode(326);
     /// `ERR_DIR_CONCURRENT_OPERATION` (instanceof Error)
     pub const DIR_CONCURRENT_OPERATION: ErrorCode = ErrorCode(327);
+    /// `ERR_TRAILING_JUNK_AFTER_STREAM_END` (instanceof TypeError)
+    pub const TRAILING_JUNK_AFTER_STREAM_END: ErrorCode = ErrorCode(328);
 
     /// == C++ `NODE_ERROR_COUNT`.
-    pub const COUNT: u16 = 328;
+    pub const COUNT: u16 = 329;
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -1084,6 +1086,8 @@ impl ErrorCode {
     pub const ERR_SECRETS_INTERACTION_REQUIRED: ErrorCode = ErrorCode::SECRETS_INTERACTION_REQUIRED;
     pub const ERR_HTTP2_GOAWAY_SESSION: ErrorCode = ErrorCode::HTTP2_GOAWAY_SESSION;
     pub const ERR_PROXY_TUNNEL: ErrorCode = ErrorCode::PROXY_TUNNEL;
+    pub const ERR_TRAILING_JUNK_AFTER_STREAM_END: ErrorCode =
+        ErrorCode::TRAILING_JUNK_AFTER_STREAM_END;
 
     // NOTE: `ERR_SYSTEM_ERROR` / `ERR_CHILD_CLOSED_BEFORE_REPLY` intentionally
     // do NOT live here. They belong to the unrelated enum
@@ -1429,6 +1433,7 @@ static CODE_STR: [&str; ErrorCode::COUNT as usize] = [
     "ERR_FS_CP_EEXIST",
     "ERR_FS_CP_SYMLINK_TO_SUBDIRECTORY",
     "ERR_DIR_CONCURRENT_OPERATION",
+    "ERR_TRAILING_JUNK_AFTER_STREAM_END",
 ];
 
 // ──────────────────────────────────────────────────────────────────────────
