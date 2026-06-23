@@ -197,6 +197,11 @@ void us_udp_socket_close(struct us_udp_socket_t *s);
 
 int us_udp_socket_set_broadcast(struct us_udp_socket_t *s, int enabled);
 
+/* SO_RCVBUF / SO_SNDBUF for a UDP socket. size == 0 reads the current value,
+ * non-zero sets it. Returns 0 and writes the resulting value to *out, or the
+ * failing setsockopt/getsockopt result (error in errno / WSAGetLastError). */
+int us_udp_socket_buffer_size(struct us_udp_socket_t *s, int is_recv, int size, int *out);
+
 /* This one is ugly, should be ext! not user */
 void *us_udp_socket_user(struct us_udp_socket_t *s);
 

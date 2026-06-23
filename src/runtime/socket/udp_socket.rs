@@ -1812,6 +1812,50 @@ impl UDPSocket {
 
         Ok(JSValue::UNDEFINED)
     }
+
+    /// `(size, isRecv)` → resulting SO_RCVBUF/SO_SNDBUF value. `size == 0`
+    /// reads the current value, non-zero sets it. Backs node:dgram's
+    /// get/setRecvBufferSize and get/setSendBufferSize.
+    // See `js_connect` — codegen `JsClass` derive owns the link name.
+    pub fn js_buffer_size(
+        global_this: &JSGlobalObject,
+        call_frame: &CallFrame,
+    ) -> JsResult<JSValue> {
+        // `as_class_ref` is the safe `&T` downcast (encapsulates `&*from_js`);
+        // mutation goes through `Cell`, so a shared borrow suffices (R-2).
+        let Some(this) = call_frame.this().as_class_ref::<UDPSocket>() else {
+            return Err(
+                global_this.throw_invalid_arguments(format_args!("Expected UDPSocket as 'this'"))
+            );
+        };
+
+        let args = call_frame.arguments_old::<2>();
+        if args.len < 2 {
+            return Err(global_this.throw_invalid_arguments(format_args!("Expected 2 arguments")));
+        }
+
+        let size = args.ptr[0].coerce_to_i32(global_this)?;
+        let is_recv = args.ptr[1].to_boolean();
+
+        let bad_fd = || {
+            bun_sys::Error::from_code_int(SystemErrno::EBADF as c_int, bun_sys::Tag::setsockopt)
+        };
+        if this.closed.get() {
+            return Err(global_this.throw_value(bad_fd().to_js(global_this)));
+        }
+        let Some(socket) = this.socket.get() else {
+            return Err(global_this.throw_value(bad_fd().to_js(global_this)));
+        };
+
+        let mut value: c_int = 0;
+        // `Socket` is an `opaque_ffi!` ZST — `opaque_mut` is the safe deref.
+        let res = uws::udp::Socket::opaque_mut(socket).buffer_size(is_recv, size, &mut value);
+        if let Some(err) = get_us_error::<true>(res, bun_sys::Tag::setsockopt) {
+            return Err(global_this.throw_value(err.to_js(global_this)));
+        }
+
+        Ok(JSValue::js_number(f64::from(value)))
+    }
 }
 
 struct Destination {

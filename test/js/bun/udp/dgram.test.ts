@@ -206,3 +206,30 @@ describe("unref()", () => {
     expect([path.join(import.meta.dir, "dgram-unref-hang-fixture.ts")]).toRun();
   });
 });
+
+test("unconnected socket does not emit ICMP unreachable errors like Node", async () => {
+  // Reserve a port, then close it so datagrams sent there trigger ICMP
+  // port-unreachable replies on loopback.
+  const target = createSocket("udp4");
+  await new Promise<void>(resolve => target.bind(0, "127.0.0.1", resolve));
+  const deadPort = target.address().port;
+  await new Promise<void>(resolve => target.close(resolve));
+
+  const source = createSocket("udp4");
+  const errors: Error[] = [];
+  source.on("error", err => errors.push(err));
+
+  try {
+    // Several sends with event-loop turns in between so any queued ICMP error
+    // would have been read back and surfaced before the next send.
+    for (let i = 0; i < 5; i++) {
+      await new Promise<void>((resolve, reject) =>
+        source.send("hello", deadPort, "127.0.0.1", err => (err ? reject(err) : resolve())),
+      );
+      await Bun.sleep(10);
+    }
+    expect(errors).toEqual([]);
+  } finally {
+    source.close();
+  }
+});
